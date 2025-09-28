@@ -40,6 +40,7 @@ except ImportError:
 
 _bridge = None
 _shared_wlan = None
+_shared_wlan_factory = None
 
 
 def _ensure_wlan():
@@ -49,6 +50,14 @@ def _ensure_wlan():
 
     if _shared_wlan:
         return _shared_wlan
+
+    if _shared_wlan_factory:
+        try:
+            wlan = _shared_wlan_factory()
+        except Exception:
+            return None
+        _shared_wlan = wlan
+        return wlan
 
     if network is None:
         return None
@@ -63,14 +72,14 @@ def _ensure_wlan():
 
 
 def initialize(device_id, state_cb, command_cb, effects_cb, wifi_defaults,
-               shared_wlan=None):
+               shared_wlan=None, shared_wlan_factory=None):
     """Initialise the Home Assistant integration.
 
     Returns a bridge instance (which exposes ``run()``) or ``None`` when the
     configuration file does not exist or MQTT support is unavailable.
     """
 
-    global _bridge
+    global _bridge, _shared_wlan_factory
 
     if MQTTClient is None or network is None:
         print("Home Assistant: MQTT client not available")
@@ -82,6 +91,9 @@ def initialize(device_id, state_cb, command_cb, effects_cb, wifi_defaults,
     except OSError:
         # No configuration present – skip integration silently.
         return None
+
+    if shared_wlan_factory is not None:
+        _shared_wlan_factory = shared_wlan_factory
 
     if shared_wlan is not None:
         global _shared_wlan

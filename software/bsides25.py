@@ -1825,7 +1825,7 @@ async def main():
             apply_homeassistant_command,
             get_effect_names,
             (SSID, PASSWORD),
-            shared_wlan=get_shared_wlan(),
+            shared_wlan_factory=get_shared_wlan,
         )
         if ha_bridge:
             asyncio.create_task(ha_bridge.run())
