@@ -80,6 +80,21 @@ def notify_effect_list():
         _bridge.request_config_sync()
 
 
+def get_sta_interface():
+    """Return the STA interface used by the integration if available."""
+
+    if _bridge:
+        return _bridge.get_wlan()
+
+    if network is None:
+        return None
+
+    try:
+        return network.WLAN(network.STA_IF)
+    except Exception:
+        return None
+
+
 class _HomeAssistantBridge:
     def __init__(self, config, device_id, state_cb, command_cb, effects_cb,
                  wifi_defaults):
@@ -105,6 +120,9 @@ class _HomeAssistantBridge:
     def _topic(self, suffix):
         base = "bsides_badge/{}".format(self._device_id.lower())
         return "{}/{}".format(base, suffix)
+
+    def get_wlan(self):
+        return self._wlan
 
     async def run(self):
         """Main worker loop."""

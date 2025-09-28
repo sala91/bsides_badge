@@ -763,51 +763,150 @@ class CodeRepoScreen(Screen):
 class WifiScanScreen(ListScreen):
     def __init__(self, oled):
         super().__init__(oled, "WiFi Networks", [("Scanning...", None)])
-        self.wlan = None
-        asyncio.create_task(self._scan_wifi())
+        self._scan_task = None
+        self._wlan = None
+        self._scan_token = None
+        self._active = True
+        self._start_scan()
 
-    async def _scan_wifi(self):
-        self.items = [("Scanning...", None)]
+    def _start_scan(self):
+        self._cancel_scan()
+        self._active = True
+        token = object()
+        self._scan_token = token
+        self._set_status("Scanning...")
+        self._scan_task = asyncio.create_task(self._scan_wifi(token))
+
+    def _cancel_scan(self):
+        if self._scan_task:
+            self._scan_task.cancel()
+            self._scan_task = None
+        self._active = False
+
+    def _set_status(self, text):
+        if not self._active:
+            return
+        self.items = [(text, None)]
+        self.index = 0
+        self.offset = 0
         self.render()
 
-        if self.wlan is None:
-            self.wlan = network.WLAN(network.STA_IF)
-
-        self.wlan.active(True)
-        await asyncio.sleep_ms(100)
-
+    async def _scan_wifi(self, token):
+        wlan = None
+        initial_active = None
         try:
-            found_nets = self.wlan.scan()
-        except Exception:
-            self.items = [("Scan Error", None)]
-            self.render()
-            return
-        finally:
-            self.wlan.active(False)
+            wlan = self._obtain_wlan()
+            if wlan is None:
+                if token is self._scan_token and self._active:
+                    self._set_status("WiFi unavailable (SELECT to retry)")
+                return
 
-        if not found_nets:
-            self.items = [("No networks found", None)]
-        else:
+            self._wlan = wlan
+            try:
+                initial_active = wlan.active()
+            except Exception:
+                initial_active = None
+
+            if initial_active is False:
+                try:
+                    wlan.active(True)
+                except Exception:
+                    if token is self._scan_token and self._active:
+                        self._set_status("Enable failed (SELECT to retry)")
+                    return
+                await asyncio.sleep_ms(200)
+
+            # The Pico W sometimes reports EINPROGRESS/-202 when the radio is
+            # busy.  Retry a few times before giving up.
+            found_nets = None
+            for attempt in range(5):
+                try:
+                    found_nets = wlan.scan()
+                    break
+                except OSError as exc:
+                    if exc.args and exc.args[0] in (-202, 110):
+                        await asyncio.sleep_ms(200)
+                        continue
+                    raise
+
+            if found_nets is None:
+                if token is self._scan_token and self._active:
+                    self._set_status("Scan timed out (SELECT to retry)")
+                return
+
+            if not found_nets:
+                if token is self._scan_token and self._active:
+                    self._set_status("No networks found (SELECT to retry)")
+                return
+
             found_nets.sort(key=lambda x: x[3], reverse=True)
-            self.items = []
+            items = []
             auth_map = {0: " ", 1: "W", 2: "P", 3: "P", 4: "P"}
-            for ssid, _, _, rssi, authmode, _ in found_nets:
+            for entry in found_nets:
+                if len(entry) < 5:
+                    continue
+                ssid = entry[0]
+                rssi = entry[3]
+                authmode = entry[4]
                 try:
                     ssid_str = ssid.decode("utf-8", "ignore")
                 except Exception:
                     ssid_str = "???"
                 auth_char = auth_map.get(authmode, "?")
-                label = "{} {:>3} {}".format(auth_char, rssi, ssid_str[:15])
-                self.items.append((label, rssi))
+                items.append(("{} {:>3} {}".format(auth_char, rssi, ssid_str[:15]), rssi))
 
-        self.index = 0
-        self.offset = 0
-        self.render()
+            if token is not self._scan_token or not self._active:
+                return
+
+            if not items:
+                self._set_status("Unsupported entries (SELECT to retry)")
+            else:
+                self.items = items
+                self.index = 0
+                self.offset = 0
+                self.render()
+
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            if token is self._scan_token and self._active:
+                self._set_status("Scan failed (SELECT to retry)")
+        finally:
+            if (token is self._scan_token and
+                    wlan is not None and initial_active is False):
+                # If the interface was originally inactive we disable it
+                # again to leave the radio as we found it.
+                try:
+                    wlan.active(False)
+                except Exception:
+                    pass
+            if token is self._scan_token:
+                self._scan_task = None
+
+    def _obtain_wlan(self):
+        if self._wlan:
+            return self._wlan
+
+        wlan = None
+        if hasattr(homeassistant, "get_sta_interface"):
+            wlan = homeassistant.get_sta_interface()
+
+        if wlan is None:
+            try:
+                wlan = network.WLAN(network.STA_IF)
+            except Exception:
+                wlan = None
+        return wlan
 
     def on_back(self):
+        self._cancel_scan()
         return BadgeScreen(self.oled)
 
     def on_select(self, index):
+        if self._scan_task and not self._scan_task.done():
+            return self
+        if self.items and self.items[index][1] is None:
+            self._start_scan()
         return self
 
 

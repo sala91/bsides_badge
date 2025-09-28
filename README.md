@@ -42,6 +42,14 @@ mpremote <port> fs cp -r software/* :/
 
 If the code is already running on the badge and `mpremote` does not connect, hold `SELECT` button down while resetting your badge (pressing `RESET` button or toggling ON/OFF switch).
 
+### Badge setup utilities
+
+From the "Badge setup" menu on the device you can:
+
+* Fetch your display name from the registration service.
+* Scan for nearby WiFi networks – the list refreshes automatically after a scan completes, and you can press `SELECT` to trigger another scan if needed.
+* View the Git repository URL for the firmware.
+
 ### Home Assistant integration
 
 Create a file named `homeassistant.json` in the root of the badge filesystem to enable the optional MQTT integration.  The badge will automatically connect to WiFi (falling back to the BSides SSID/password when no custom credentials are provided), publish Home Assistant discovery information, and expose the LED ring as a controllable light entity.
