@@ -8,11 +8,16 @@ import ssl
 import json
 import uasyncio as asyncio
 import time, micropython
+import gc
 from machine import Pin, I2C
 import ssd1306, neopixel
 import bsides_logo
 import math
-import homeassistant
+
+try:
+    import homeassistant
+except ImportError:
+    homeassistant = None
 
 # Writer
 from writer.writer import Writer
@@ -63,16 +68,24 @@ def get_shared_sta():
         return _shared_sta
 
     wlan = None
-    if hasattr(homeassistant, "get_sta_interface"):
+    if homeassistant and hasattr(homeassistant, "get_sta_interface"):
         try:
             wlan = homeassistant.get_sta_interface()
         except Exception:
             wlan = None
 
     if wlan is None:
-        try:
-            wlan = network.WLAN(network.STA_IF)
-        except Exception:
+        for attempt in range(2):
+            try:
+                wlan = network.WLAN(network.STA_IF)
+                break
+            except MemoryError:
+                gc.collect()
+                wlan = None
+            except Exception:
+                wlan = None
+                break
+        else:
             wlan = None
 
     if wlan:
@@ -422,7 +435,7 @@ class ParamScreen(Screen):
                 changed = True
         elif btn in (BTN_SELECT, BTN_BACK):
             return self.returnscreen(self.oled)
-        if changed:
+        if changed and homeassistant:
             homeassistant.notify_led_state()
         return self
 
@@ -502,7 +515,8 @@ class EffectScreen(ListScreen):
     def on_select(self, index):
         global led_effect
         led_effect.value = index
-        homeassistant.notify_led_state()
+        if homeassistant:
+            homeassistant.notify_led_state()
         return self
 
     def on_back(self):
@@ -711,17 +725,21 @@ class FetchNameScreen(Screen):
         last_error = None
         for attempt in range(2):
             try:
+                gc.collect()
                 self.wlan.connect(SSID, PASSWORD)
                 break
+            except MemoryError as exc:
+                last_error = exc
+                gc.collect()
             except Exception as exc:
                 last_error = exc
-                try:
-                    self.wlan.active(False)
-                    await asyncio.sleep_ms(200)
-                    self.wlan.active(True)
-                    await asyncio.sleep_ms(200)
-                except Exception:
-                    break
+            try:
+                self.wlan.active(False)
+                await asyncio.sleep_ms(200)
+                self.wlan.active(True)
+                await asyncio.sleep_ms(200)
+            except Exception:
+                break
         else:
             raise RuntimeError("WiFi init failed: {}".format(last_error))
 
@@ -886,6 +904,7 @@ class WifiScanScreen(ListScreen):
         wlan = None
         initial_active = None
         try:
+            gc.collect()
             wlan = self._obtain_wlan()
             if wlan is None:
                 if token is self._scan_token and self._active:
@@ -1789,7 +1808,8 @@ async def neopixel_task(np):
 
     led_effect.maxval = len(led_effects) - 1
 
-    homeassistant.notify_effect_list()
+    if homeassistant:
+        homeassistant.notify_effect_list()
 
     while True:
         if led_startup == True:
@@ -1918,16 +1938,17 @@ async def main():
     show_bsides_logo(oled)
     print("Username: {}".format(USERNAME))
 
-    ha_bridge = homeassistant.initialize(
-        device_id,
-        get_led_state_for_homeassistant,
-        apply_homeassistant_command,
-        get_effect_names,
-        (SSID, PASSWORD),
-        get_shared_sta(),
-    )
-    if ha_bridge:
-        asyncio.create_task(ha_bridge.run())
+    if homeassistant:
+        ha_bridge = homeassistant.initialize(
+            device_id,
+            get_led_state_for_homeassistant,
+            apply_homeassistant_command,
+            get_effect_names,
+            (SSID, PASSWORD),
+            get_shared_sta(),
+        )
+        if ha_bridge:
+            asyncio.create_task(ha_bridge.run())
 
     await asyncio.gather(ui_task(oled), inactivity_task(oled), neopixel_task(np))
 

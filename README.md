@@ -52,7 +52,7 @@ From the "Badge setup" menu on the device you can:
 
 ### Home Assistant integration
 
-Create a file named `homeassistant.json` in the root of the badge filesystem to enable the optional MQTT integration.  The badge will automatically connect to WiFi (falling back to the BSides SSID/password when no custom credentials are provided), publish Home Assistant discovery information, and expose the LED ring as a controllable light entity.
+Create a file named `homeassistant.json` in the root of the badge filesystem to enable the optional MQTT integration.  When Wi-Fi credentials are supplied the badge will connect automatically, publish Home Assistant discovery information, and expose the LED ring as a controllable light entity.  If you would like the bridge to reuse the built-in BSides SSID/password, set `"use_defaults": true` inside the `wifi` block; otherwise the bridge waits for an existing connection (for example, one initiated from the Fetch Name workflow).
 
 Example configuration:
 
@@ -68,6 +68,19 @@ Example configuration:
     "username": "ha",
     "password": "ha-pass",
     "discovery_prefix": "homeassistant"
+  }
+}
+```
+
+To use the default BSides Wi-Fi credentials instead of providing your own SSID, supply an empty `wifi` block with `"use_defaults": true`.
+
+```
+{
+  "wifi": {
+    "use_defaults": true
+  },
+  "mqtt": {
+    "broker": "192.168.1.10"
   }
 }
 ```

@@ -197,6 +197,10 @@ class _HomeAssistantBridge:
                     if self._wlan.isconnected():
                         break
                     await asyncio.sleep(0.25)
+            elif not self._wlan.isconnected():
+                # No credentials supplied – wait for an external connection.
+                self._connected = False
+                return
 
         if not self._wlan.isconnected():
             raise RuntimeError("WiFi connection failed")
@@ -209,13 +213,20 @@ class _HomeAssistantBridge:
             self._availability_sent = False
 
     def _wifi_credentials(self):
-        wifi_cfg = self._config.get("wifi", {})
+        wifi_cfg = self._config.get("wifi")
+        if not wifi_cfg:
+            return None, None
+
         ssid = wifi_cfg.get("ssid")
         password = wifi_cfg.get("password")
 
         if ssid:
             return ssid, password
-        return self._wifi_defaults
+
+        if self._wifi_defaults and wifi_cfg.get("use_defaults", False):
+            return self._wifi_defaults
+
+        return None, None
 
     def _connect_mqtt(self):
         mqtt_cfg = self._config.get("mqtt", {})
