@@ -37,6 +37,12 @@ NEOPIXEL_PIN = 3
 NEOPIXEL_COUNT = 16
 NEOPIXEL_FPS = 50
 
+# Limit number of Wi-Fi entries shown to avoid exhausting RAM when
+# formatting very large scan results (city conference environments can
+# easily return 40+ entries).
+MAX_WIFI_NETWORKS = 12
+AUTH_MODE_MAP = {0: " ", 1: "W", 2: "P", 3: "P", 4: "P"}
+
 # Buttons
 BTN_NEXT_PIN = 5      # Next / Increase
 BTN_PREV_PIN = 8      # Previous / Decrease
@@ -858,20 +864,27 @@ class WifiScanScreen(ListScreen):
                 return
 
             nets.sort(key=lambda entry: entry[3], reverse=True)
-            auth_map = {0: " ", 1: "W", 2: "P", 3: "P", 4: "P"}
+            if len(nets) > MAX_WIFI_NETWORKS:
+                # Trim the list *in place* so we drop references to the
+                # remaining tuples before we start allocating formatted
+                # strings for rendering.  This keeps peak RAM usage low.
+                del nets[MAX_WIFI_NETWORKS:]
+
             items = []
             for ssid, _, _, rssi, authmode, *_ in nets:
                 try:
                     ssid_str = ssid.decode("utf-8", "ignore")
                 except Exception:
                     ssid_str = "???"
-                auth_char = auth_map.get(authmode, "?")
+                auth_char = AUTH_MODE_MAP.get(authmode, "?")
                 items.append(("{} {:>3} {}".format(auth_char, rssi, ssid_str[:15]), rssi))
 
             self.items = items or [("Unsupported entries", None)]
             self.index = 0
             self.offset = 0
             self.render()
+            del nets
+            gc.collect()
         except asyncio.CancelledError:
             pass
         finally:
