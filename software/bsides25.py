@@ -9,6 +9,10 @@ import json
 import uasyncio as asyncio
 import time, micropython
 import gc
+try:
+    import errno
+except ImportError:  # pragma: no cover - MicroPython always provides errno
+    errno = type("errno", (), {"ENOMEM": 12})
 from machine import Pin, I2C
 import ssd1306, neopixel
 import bsides_logo
@@ -92,6 +96,43 @@ def get_shared_wlan():
         gc.collect()
         _shared_wlan = network.WLAN(network.STA_IF)
     return _shared_wlan
+
+
+def _format_wifi_exception(exc):
+    """Return a short, user-facing description for Wi-Fi scan failures."""
+
+    if isinstance(exc, MemoryError):
+        return "Out of memory"
+
+    if isinstance(exc, OSError):
+        err_no = getattr(exc, "errno", None)
+        if err_no is None and exc.args:
+            first = exc.args[0]
+            if isinstance(first, int):
+                err_no = first
+        if err_no == getattr(errno, "ENOMEM", 12):
+            return "Driver ENOMEM"
+        if err_no is not None:
+            return "OSError {}".format(err_no)
+        msg = str(exc)
+        return msg or "OSError"
+
+    return str(exc) or exc.__class__.__name__
+
+
+def _split_display_message(message, max_len=20):
+    """Split a long detail string so it fits within the OLED width."""
+
+    if not message:
+        return []
+
+    chunks = []
+    start = 0
+    length = len(message)
+    while start < length:
+        chunks.append(message[start:start + max_len])
+        start += max_len
+    return chunks
 
 # -----------------------
 # Globals
@@ -826,6 +867,19 @@ class WifiScanScreen(ListScreen):
         self.wlan = None
         self._scan_task = asyncio.create_task(self._scan_wifi())
 
+    def _show_scan_error(self, detail, exc=None):
+        lines = [("WiFi error", None)]
+        for chunk in _split_display_message(detail):
+            lines.append((chunk, None))
+        lines.append(("SELECT to retry", None))
+        lines.append(("BACK to exit", None))
+        self.items = lines
+        self.index = 0
+        self.offset = 0
+        self.render()
+        if exc is not None:
+            sys.print_exception(exc)
+
     async def _scan_wifi(self):
         global _shared_wlan
         try:
@@ -850,8 +904,7 @@ class WifiScanScreen(ListScreen):
                         self.wlan = get_shared_wlan()
                 wlan = self.wlan
             except Exception as exc:
-                self.items = [("WiFi error", None), (str(exc), None)]
-                self.render()
+                self._show_scan_error(_format_wifi_exception(exc), exc)
                 return
 
             try:
@@ -861,13 +914,11 @@ class WifiScanScreen(ListScreen):
                 await asyncio.sleep_ms(100)
                 try:
                     nets = wlan.scan()
-                except MemoryError:
-                    self.items = [("WiFi error", None), ("Out of memory", None), ("BACK to exit", None)]
-                    self.render()
+                except Exception as exc:
+                    self._show_scan_error(_format_wifi_exception(exc), exc)
                     return
-            except Exception:
-                self.items = [("Scan failed", None), ("SELECT to retry", None)]
-                self.render()
+            except Exception as exc:
+                self._show_scan_error(_format_wifi_exception(exc), exc)
                 return
             finally:
                 if not already_active:
