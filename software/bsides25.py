@@ -43,6 +43,12 @@ NEOPIXEL_FPS = 50
 MAX_WIFI_NETWORKS = 12
 AUTH_MODE_MAP = {0: " ", 1: "W", 2: "P", 3: "P", 4: "P"}
 
+# Wi-Fi scan parameters.  We sweep channels individually while reusing a
+# small RX buffer so we never need to materialise a giant list of access
+# points in one go, which was exhausting the heap on busy show floors.
+WIFI_SCAN_CHANNELS = tuple(range(1, 14))
+_wifi_scan_rxbuf = bytearray(1024)
+
 # Buttons
 BTN_NEXT_PIN = 5      # Next / Increase
 BTN_PREV_PIN = 8      # Previous / Decrease
@@ -74,6 +80,62 @@ def get_shared_wlan():
         gc.collect()
         _shared_wlan = network.WLAN(network.STA_IF)
     return _shared_wlan
+
+
+def _remember_network(top_entries, candidate):
+    """Keep track of the strongest access points without growing the list."""
+
+    bssid = candidate[1]
+    for idx, entry in enumerate(top_entries):
+        if entry[1] == bssid:
+            # Only replace if this reading is stronger.
+            if candidate[3] > entry[3]:
+                top_entries[idx] = candidate
+            return
+
+    if len(top_entries) < MAX_WIFI_NETWORKS:
+        top_entries.append(candidate)
+        return
+
+    # List already full: replace the weakest entry if the new one is stronger.
+    weakest_idx = 0
+    weakest_rssi = top_entries[0][3]
+    for idx in range(1, len(top_entries)):
+        if top_entries[idx][3] < weakest_rssi:
+            weakest_idx = idx
+            weakest_rssi = top_entries[idx][3]
+
+    if candidate[3] > weakest_rssi:
+        top_entries[weakest_idx] = candidate
+
+
+async def _gather_wifi_networks(wlan):
+    """Scan per-channel to avoid the huge one-shot allocation from wlan.scan()."""
+
+    strongest = []
+    for channel in WIFI_SCAN_CHANNELS:
+        await asyncio.sleep_ms(25)
+        try:
+            nets = wlan.scan(channel=channel, rxbuf=_wifi_scan_rxbuf)
+        except MemoryError:
+            raise
+        except OSError:
+            # Ignore channel-specific failures and keep going.
+            continue
+
+        for entry in nets:
+            _remember_network(strongest, entry)
+
+        del nets
+        gc.collect()
+
+        if len(strongest) >= MAX_WIFI_NETWORKS:
+            # Continue to sweep remaining channels but give the scheduler a
+            # chance so UI remains responsive.
+            await asyncio.sleep_ms(0)
+
+    strongest.sort(key=lambda entry: entry[3], reverse=True)
+    return strongest
 
 # -----------------------
 # Globals
@@ -842,7 +904,7 @@ class WifiScanScreen(ListScreen):
                 wlan.active(True)
                 await asyncio.sleep_ms(100)
                 try:
-                    nets = wlan.scan()
+                    nets = await _gather_wifi_networks(wlan)
                 except MemoryError:
                     self.items = [("WiFi error", None), ("Out of memory", None), ("BACK to exit", None)]
                     self.render()
@@ -862,13 +924,6 @@ class WifiScanScreen(ListScreen):
                 self.items = [("No networks found", None), ("SELECT to retry", None)]
                 self.render()
                 return
-
-            nets.sort(key=lambda entry: entry[3], reverse=True)
-            if len(nets) > MAX_WIFI_NETWORKS:
-                # Trim the list *in place* so we drop references to the
-                # remaining tuples before we start allocating formatted
-                # strings for rendering.  This keeps peak RAM usage low.
-                del nets[MAX_WIFI_NETWORKS:]
 
             items = []
             for ssid, _, _, rssi, authmode, *_ in nets:
