@@ -39,9 +39,31 @@ except ImportError:
 
 
 _bridge = None
+_shared_wlan = None
 
 
-def initialize(device_id, state_cb, command_cb, effects_cb, wifi_defaults):
+def _ensure_wlan():
+    """Return the shared STA interface, creating it when required."""
+
+    global _shared_wlan
+
+    if _shared_wlan:
+        return _shared_wlan
+
+    if network is None:
+        return None
+
+    try:
+        wlan = network.WLAN(network.STA_IF)
+    except Exception:
+        return None
+
+    _shared_wlan = wlan
+    return wlan
+
+
+def initialize(device_id, state_cb, command_cb, effects_cb, wifi_defaults,
+               shared_wlan=None):
     """Initialise the Home Assistant integration.
 
     Returns a bridge instance (which exposes ``run()``) or ``None`` when the
@@ -61,8 +83,17 @@ def initialize(device_id, state_cb, command_cb, effects_cb, wifi_defaults):
         # No configuration present – skip integration silently.
         return None
 
+    if shared_wlan is not None:
+        global _shared_wlan
+        _shared_wlan = shared_wlan
+
+    wlan = _ensure_wlan()
+    if wlan is None:
+        print("Home Assistant: WiFi interface unavailable")
+        return None
+
     _bridge = _HomeAssistantBridge(config, device_id, state_cb, command_cb,
-                                   effects_cb, wifi_defaults)
+                                   effects_cb, wifi_defaults, wlan)
     return _bridge
 
 
@@ -86,18 +117,12 @@ def get_sta_interface():
     if _bridge:
         return _bridge.get_wlan()
 
-    if network is None:
-        return None
-
-    try:
-        return network.WLAN(network.STA_IF)
-    except Exception:
-        return None
+    return _ensure_wlan()
 
 
 class _HomeAssistantBridge:
     def __init__(self, config, device_id, state_cb, command_cb, effects_cb,
-                 wifi_defaults):
+                 wifi_defaults, wlan):
         self._config = config
         self._device_id = device_id
         self._state_cb = state_cb
@@ -105,7 +130,7 @@ class _HomeAssistantBridge:
         self._effects_cb = effects_cb
         self._wifi_defaults = wifi_defaults
 
-        self._wlan = network.WLAN(network.STA_IF)
+        self._wlan = wlan
         self._client = None
         self._connected = False
 
