@@ -14,10 +14,34 @@ import ssd1306, neopixel
 import bsides_logo
 import math
 
-try:
-    import homeassistant
-except ImportError:
-    homeassistant = None
+homeassistant = None
+_homeassistant_checked = False
+
+
+def ensure_homeassistant_loaded():
+    """Import the optional Home Assistant bridge only when configured."""
+
+    global homeassistant, _homeassistant_checked
+
+    if _homeassistant_checked:
+        return homeassistant
+
+    _homeassistant_checked = True
+
+    try:
+        os.stat("homeassistant.json")
+    except OSError:
+        homeassistant = None
+        return None
+
+    try:
+        import homeassistant as ha_mod  # type: ignore
+    except ImportError:
+        homeassistant = None
+        return None
+
+    homeassistant = ha_mod
+    return homeassistant
 
 # Writer
 from writer.writer import Writer
@@ -1818,8 +1842,10 @@ async def main():
     show_bsides_logo(oled)
     print("Username: {}".format(USERNAME))
 
-    if homeassistant:
-        ha_bridge = homeassistant.initialize(
+    ha_module = ensure_homeassistant_loaded()
+
+    if ha_module:
+        ha_bridge = ha_module.initialize(
             device_id,
             get_led_state_for_homeassistant,
             apply_homeassistant_command,
