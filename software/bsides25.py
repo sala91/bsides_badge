@@ -8,10 +8,16 @@ import ssl
 import json
 import uasyncio as asyncio
 import time, micropython
+import gc
 from machine import Pin, I2C
 import ssd1306, neopixel
 import bsides_logo
 import math
+
+try:
+    import homeassistant
+except ImportError:
+    homeassistant = None
 
 # Writer
 from writer.writer import Writer
@@ -49,6 +55,19 @@ SSID = "bsides-badge"
 PASSWORD = "bsidestallinn"
 URL = "https://badge.bsides.ee"
 URL_QR = "badge.bsides.ee"
+
+_shared_wlan = None
+
+
+def get_shared_wlan():
+    """Return a module-wide STA interface, creating it lazily."""
+
+    global _shared_wlan
+
+    if _shared_wlan is None:
+        gc.collect()
+        _shared_wlan = network.WLAN(network.STA_IF)
+    return _shared_wlan
 
 # -----------------------
 # Globals
@@ -130,6 +149,89 @@ def load_params():
     except OSError:
         # file not found, keep defaults
         pass
+
+
+def get_effect_names():
+    return [name for name, _ in led_effects] if led_effects else []
+
+
+def _clamp(value, minimum, maximum):
+    return max(minimum, min(maximum, value))
+
+
+def get_led_state_for_homeassistant():
+    effect_index = led_effect.value if led_effect.value < len(led_effects) else 0
+    effect_name = None
+    effect_list = get_effect_names()
+    if effect_index < len(effect_list):
+        effect_name = effect_list[effect_index]
+
+    brightness_255 = int((led_brightness.value * 255) / max(1, led_brightness.maxval))
+    return {
+        "effect_index": effect_index,
+        "effect_name": effect_name,
+        "brightness": _clamp(brightness_255, 0, 255),
+        "hue": _clamp(led_hue.value, 0, led_hue.maxval),
+        "saturation": _clamp(led_sat.value, 0, led_sat.maxval),
+        "speed": _clamp(led_speed.value, 0, led_speed.maxval),
+    }
+
+
+def apply_homeassistant_command(cmd):
+    changed = False
+
+    if "effect" in cmd:
+        effect_list = get_effect_names()
+        effect_value = cmd.get("effect")
+        new_idx = None
+        if isinstance(effect_value, int):
+            if 0 <= effect_value < len(effect_list):
+                new_idx = effect_value
+        elif isinstance(effect_value, str):
+            if effect_value in effect_list:
+                new_idx = effect_list.index(effect_value)
+        if new_idx is not None and led_effect.value != new_idx:
+            led_effect.value = new_idx
+            changed = True
+
+    if "brightness" in cmd:
+        try:
+            value = int(cmd["brightness"])
+            value = _clamp(value, 0, 255)
+            new_val = int((value * led_brightness.maxval) / 255)
+            new_val = _clamp(new_val, 0, led_brightness.maxval)
+            if led_brightness.value != new_val:
+                led_brightness.value = new_val
+                changed = True
+        except (ValueError, TypeError):
+            pass
+
+    hs_color = cmd.get("hs_color")
+    if isinstance(hs_color, (list, tuple)) and len(hs_color) >= 2:
+        try:
+            h = int(hs_color[0]) % 360
+            s = int(hs_color[1])
+            s = _clamp(s, 0, 100)
+            if led_hue.value != h or led_sat.value != s:
+                led_hue.value = h
+                led_sat.value = s
+                changed = True
+        except (ValueError, TypeError):
+            pass
+
+    if "speed" in cmd:
+        try:
+            new_speed = _clamp(int(cmd["speed"]), 0, led_speed.maxval)
+            if led_speed.value != new_speed:
+                led_speed.value = new_speed
+                changed = True
+        except (ValueError, TypeError):
+            pass
+
+    if changed:
+        save_params()
+
+    return changed
 
 # -----------------------
 # Username and ID
@@ -296,12 +398,21 @@ class ParamScreen(Screen):
         self.oled.show()
 
     async def handle_button(self, btn):
+        changed = False
         if btn == BTN_NEXT and (self.wraparound or self.param.value < self.param.maxval):
-            self.param.value = (self.param.value + 1) % (self.param.maxval + 1)
+            new_val = (self.param.value + 1) % (self.param.maxval + 1)
+            if new_val != self.param.value:
+                self.param.value = new_val
+                changed = True
         elif btn == BTN_PREV and (self.wraparound or self.param.value > 0):
-            self.param.value = (self.param.value - 1) % (self.param.maxval + 1)
+            new_val = (self.param.value - 1) % (self.param.maxval + 1)
+            if new_val != self.param.value:
+                self.param.value = new_val
+                changed = True
         elif btn in (BTN_SELECT, BTN_BACK):
             return self.returnscreen(self.oled)
+        if changed and homeassistant:
+            homeassistant.notify_led_state()
         return self
 
 class BrightnessScreen(ParamScreen):
@@ -380,6 +491,8 @@ class EffectScreen(ListScreen):
     def on_select(self, index):
         global led_effect
         led_effect.value = index
+        if homeassistant:
+            homeassistant.notify_led_state()
         return self
 
     def on_back(self):
@@ -512,6 +625,7 @@ class FetchNameScreen(Screen):
         self.index = 0  # only one item
         self.message = ""  # status message to display
         self.wlan = None
+        self._connected_via_fetch = False
 
     async def handle_button(self, btn):
         global username_lines, USERNAME
@@ -551,28 +665,43 @@ class FetchNameScreen(Screen):
 
     async def _connect_wifi(self):
         if not self.wlan:
-            self.wlan = network.WLAN(network.STA_IF)
+            self.wlan = get_shared_wlan()
+        gc.collect()
         self.wlan.active(True)
         if not self.wlan.isconnected():
             self.wlan.connect(SSID, PASSWORD)
             for _ in range(20):  # wait up to ~10 seconds
                 await asyncio.sleep(0.5)
                 if self.wlan.isconnected():
+                    self._connected_via_fetch = True
                     return
             raise RuntimeError("Could not connect to WiFi")
+        self._connected_via_fetch = False
 
     async def _disconnect_wifi(self):
         if not self.wlan:
             return
-        try:
-            self.wlan.disconnect()
-        except OSError:
-            pass
-        for _ in range(20):  # up to ~10 seconds
-            if not self.wlan.isconnected():
-                break
-            await asyncio.sleep(0.5)
-        self.wlan.active(False)
+        if self._connected_via_fetch:
+            try:
+                self.wlan.disconnect()
+            except OSError:
+                pass
+            for _ in range(20):  # up to ~10 seconds
+                if not self.wlan.isconnected():
+                    break
+                await asyncio.sleep(0.5)
+            ha_iface = None
+            if homeassistant and getattr(homeassistant, "_bridge", None):
+                try:
+                    ha_iface = homeassistant.get_sta_interface()
+                except AttributeError:
+                    ha_iface = None
+            if ha_iface is not self.wlan:
+                try:
+                    self.wlan.active(False)
+                except OSError:
+                    pass
+            self._connected_via_fetch = False
 
     async def _fetch_name(self):
         # parse URL
@@ -666,7 +795,104 @@ class CodeRepoScreen(Screen):
 
         self.oled.show()
 
+class WifiScanScreen(ListScreen):
+    def __init__(self, oled):
+        super().__init__(oled, "WiFi Networks", [("Scanning...", None)])
+        self._scan_task = None
+        self.wlan = None
+        self._scan_task = asyncio.create_task(self._scan_wifi())
+
+    async def _scan_wifi(self):
+        global _shared_wlan
+        try:
+            self.items = [("Scanning...", None)]
+            self.index = 0
+            self.offset = 0
+            self.render()
+
+            try:
+                if not self.wlan:
+                    ha_wlan = None
+                    if homeassistant and getattr(homeassistant, "_bridge", None):
+                        try:
+                            ha_wlan = homeassistant.get_sta_interface()
+                        except AttributeError:
+                            ha_wlan = None
+                    if ha_wlan:
+                        if _shared_wlan is None:
+                            _shared_wlan = ha_wlan
+                        self.wlan = ha_wlan
+                    else:
+                        self.wlan = get_shared_wlan()
+                wlan = self.wlan
+            except Exception as exc:
+                self.items = [("WiFi error", None), (str(exc), None)]
+                self.render()
+                return
+
+            try:
+                already_active = wlan.active()
+                gc.collect()
+                wlan.active(True)
+                await asyncio.sleep_ms(100)
+                try:
+                    nets = wlan.scan()
+                except MemoryError:
+                    self.items = [("WiFi error", None), ("Out of memory", None), ("BACK to exit", None)]
+                    self.render()
+                    return
+            except Exception:
+                self.items = [("Scan failed", None), ("SELECT to retry", None)]
+                self.render()
+                return
+            finally:
+                if not already_active:
+                    try:
+                        wlan.active(False)
+                    except Exception:
+                        pass
+
+            if not nets:
+                self.items = [("No networks found", None), ("SELECT to retry", None)]
+                self.render()
+                return
+
+            nets.sort(key=lambda entry: entry[3], reverse=True)
+            auth_map = {0: " ", 1: "W", 2: "P", 3: "P", 4: "P"}
+            items = []
+            for ssid, _, _, rssi, authmode, *_ in nets:
+                try:
+                    ssid_str = ssid.decode("utf-8", "ignore")
+                except Exception:
+                    ssid_str = "???"
+                auth_char = auth_map.get(authmode, "?")
+                items.append(("{} {:>3} {}".format(auth_char, rssi, ssid_str[:15]), rssi))
+
+            self.items = items or [("Unsupported entries", None)]
+            self.index = 0
+            self.offset = 0
+            self.render()
+        except asyncio.CancelledError:
+            pass
+        finally:
+            self._scan_task = None
+
+    def on_select(self, index):
+        if self._scan_task and not self._scan_task.done():
+            return self
+
+        self._scan_task = asyncio.create_task(self._scan_wifi())
+        return self
+
+    def on_back(self):
+        if self._scan_task:
+            self._scan_task.cancel()
+            self._scan_task = None
+        return BadgeScreen(self.oled)
+
+
 badge_screens = [("Fetch Name", FetchNameScreen),
+                 ("Scan WiFi", WifiScanScreen),
                  ("Code git", CodeRepoScreen)]
 
 class BadgeScreen(ListScreen):
@@ -1377,6 +1603,70 @@ def led_eff_spiral_spin(np, oldstate):
     return state
 
 
+def led_eff_olympic(np, oldstate):
+    """Olympic rings inspired segments that slowly rotate around the ring."""
+    state = oldstate or {"phase": 0.0}
+    n = len(np)
+
+    if n == 0:
+        return state
+
+    olympic_colors = [240, 60, 0, 120, 360]  # blue, yellow, black, green, red
+    ring_size = n / 5
+    s = led_sat.value / 100
+    v = led_brightness.value / 100
+
+    for i in range(n):
+        rotated_pos = (i + state["phase"]) % n
+        ring_index = int(rotated_pos / ring_size) % 5
+        ring_pos = (rotated_pos % ring_size) / ring_size
+
+        brightness_mult = 0.3 + 0.7 * (0.5 * (1 + math.sin(ring_pos * 2 * math.pi)))
+
+        if ring_index == 2:
+            dim = int(255 * v * brightness_mult * 0.2)
+            np[i] = (dim, dim, dim)
+        else:
+            hue = olympic_colors[ring_index] % 360
+            np[i] = hsv_to_rgb(hue, s, v * brightness_mult)
+
+    state["phase"] = (state["phase"] + led_speed.value / 300.0) % n
+    return state
+
+
+def led_eff_police(np, oldstate):
+    """Alternating red and blue strobes reminiscent of police lights."""
+    state = oldstate or {"phase": 0}
+    n = len(np)
+
+    if n == 0:
+        return state
+
+    half_size = n // 2
+    phase = state["phase"]
+
+    s = led_sat.value / 100
+    v = led_brightness.value / 100
+    red = hsv_to_rgb(0, s, v)
+    blue = hsv_to_rgb(240, s, v)
+    off = (0, 0, 0)
+
+    np.fill(off)
+
+    if 0 <= phase < 25:
+        for i in range(half_size):
+            np[i] = red
+    elif 50 <= phase < 75:
+        for i in range(half_size, n):
+            np[i] = blue
+
+    increment = int(led_speed.value / 10)
+    if increment < 1:
+        increment = 1
+    state["phase"] = (phase + increment) % 100
+    return state
+
+
 async def neopixel_task(np):
     global led_effect
     global led_effects
@@ -1389,10 +1679,17 @@ async def neopixel_task(np):
                    ("Comet", led_eff_comet),
                    ("Rainbow Comet", led_eff_rainbow_comet),
                    ("Ping-Pong", led_eff_ping_pong),
-                   ("Dual Hue", led_eff_dual_hue),        
+                   ("Dual Hue", led_eff_dual_hue),
                    ("Aurora", led_eff_aurora),
                    ("Spiral Spin", led_eff_spiral_spin),
+                   ("Olympic", led_eff_olympic),
+                   ("Police", led_eff_police),
                    ("Cycle_All", led_eff_autocycle)]
+
+    led_effect.maxval = len(led_effects) - 1
+
+    if homeassistant:
+        homeassistant.notify_effect_list()
 
     while True:
         if led_startup == True:
@@ -1520,6 +1817,18 @@ async def main():
     load_params()
     show_bsides_logo(oled)
     print("Username: {}".format(USERNAME))
+
+    if homeassistant:
+        ha_bridge = homeassistant.initialize(
+            device_id,
+            get_led_state_for_homeassistant,
+            apply_homeassistant_command,
+            get_effect_names,
+            (SSID, PASSWORD),
+            shared_wlan_factory=get_shared_wlan,
+        )
+        if ha_bridge:
+            asyncio.create_task(ha_bridge.run())
 
     await asyncio.gather(ui_task(oled), inactivity_task(oled), neopixel_task(np))
 
