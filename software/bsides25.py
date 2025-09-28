@@ -8,7 +8,6 @@ import ssl
 import json
 import uasyncio as asyncio
 import time, micropython
-import gc
 from machine import Pin, I2C
 import ssd1306, neopixel
 import bsides_logo
@@ -55,43 +54,6 @@ SSID = "bsides-badge"
 PASSWORD = "bsidestallinn"
 URL = "https://badge.bsides.ee"
 URL_QR = "badge.bsides.ee"
-
-_shared_sta = None
-
-
-def get_shared_sta():
-    """Obtain the shared STA interface, creating it on demand."""
-
-    global _shared_sta
-
-    if _shared_sta:
-        return _shared_sta
-
-    wlan = None
-    if homeassistant and hasattr(homeassistant, "get_sta_interface"):
-        try:
-            wlan = homeassistant.get_sta_interface()
-        except Exception:
-            wlan = None
-
-    if wlan is None:
-        for attempt in range(2):
-            try:
-                wlan = network.WLAN(network.STA_IF)
-                break
-            except MemoryError:
-                gc.collect()
-                wlan = None
-            except Exception:
-                wlan = None
-                break
-        else:
-            wlan = None
-
-    if wlan:
-        _shared_sta = wlan
-
-    return wlan
 
 # -----------------------
 # Globals
@@ -649,9 +611,6 @@ class FetchNameScreen(Screen):
         self.index = 0  # only one item
         self.message = ""  # status message to display
         self.wlan = None
-        self._restore_active = False
-        self._restore_disconnect = False
-        self._initial_active = True
 
     async def handle_button(self, btn):
         global username_lines, USERNAME
@@ -690,92 +649,29 @@ class FetchNameScreen(Screen):
         return self
 
     async def _connect_wifi(self):
-        self._restore_active = False
-        self._restore_disconnect = False
-
         if not self.wlan:
-            self.wlan = get_shared_sta()
-        if not self.wlan:
-            raise RuntimeError("WiFi unavailable")
-
-        try:
-            was_active = self.wlan.active()
-        except Exception:
-            was_active = True
-
-        self._initial_active = was_active
-        self._restore_active = not was_active
-
-        if not was_active:
-            try:
-                self.wlan.active(True)
-            except Exception as exc:
-                raise RuntimeError("Enable failed: {}".format(exc))
-            await asyncio.sleep_ms(200)
-
-        try:
-            already_connected = self.wlan.isconnected()
-        except Exception:
-            already_connected = False
-
-        if already_connected:
-            self._restore_disconnect = False
-            return
-
-        last_error = None
-        for attempt in range(2):
-            try:
-                gc.collect()
-                self.wlan.connect(SSID, PASSWORD)
-                break
-            except MemoryError as exc:
-                last_error = exc
-                gc.collect()
-            except Exception as exc:
-                last_error = exc
-            try:
-                self.wlan.active(False)
-                await asyncio.sleep_ms(200)
-                self.wlan.active(True)
-                await asyncio.sleep_ms(200)
-            except Exception:
-                break
-        else:
-            raise RuntimeError("WiFi init failed: {}".format(last_error))
-
-        for _ in range(20):  # wait up to ~10 seconds
-            await asyncio.sleep(0.5)
-            try:
+            self.wlan = network.WLAN(network.STA_IF)
+        self.wlan.active(True)
+        if not self.wlan.isconnected():
+            self.wlan.connect(SSID, PASSWORD)
+            for _ in range(20):  # wait up to ~10 seconds
+                await asyncio.sleep(0.5)
                 if self.wlan.isconnected():
-                    self._restore_disconnect = True
                     return
-            except Exception:
-                break
-
-        raise RuntimeError("Could not connect to WiFi")
+            raise RuntimeError("Could not connect to WiFi")
 
     async def _disconnect_wifi(self):
         if not self.wlan:
             return
-
-        if self._restore_disconnect:
-            try:
-                self.wlan.disconnect()
-            except OSError:
-                pass
-            for _ in range(20):  # up to ~10 seconds
-                try:
-                    if not self.wlan.isconnected():
-                        break
-                except Exception:
-                    break
-                await asyncio.sleep(0.5)
-
-        if self._restore_active:
-            try:
-                self.wlan.active(False)
-            except OSError:
-                pass
+        try:
+            self.wlan.disconnect()
+        except OSError:
+            pass
+        for _ in range(20):  # up to ~10 seconds
+            if not self.wlan.isconnected():
+                break
+            await asyncio.sleep(0.5)
+        self.wlan.active(False)
 
     async def _fetch_name(self):
         # parse URL
@@ -873,91 +769,45 @@ class WifiScanScreen(ListScreen):
     def __init__(self, oled):
         super().__init__(oled, "WiFi Networks", [("Scanning...", None)])
         self._scan_task = None
-        self._wlan = None
-        self._scan_token = None
-        self._active = True
-        self._start_scan()
+        self._scan_task = asyncio.create_task(self._scan_wifi())
 
-    def _start_scan(self):
-        self._cancel_scan()
-        self._active = True
-        token = object()
-        self._scan_token = token
-        self._set_status("Scanning...")
-        self._scan_task = asyncio.create_task(self._scan_wifi(token))
-
-    def _cancel_scan(self):
-        if self._scan_task:
-            self._scan_task.cancel()
-            self._scan_task = None
-        self._active = False
-
-    def _set_status(self, text):
-        if not self._active:
-            return
-        self.items = [(text, None)]
-        self.index = 0
-        self.offset = 0
-        self.render()
-
-    async def _scan_wifi(self, token):
-        wlan = None
-        initial_active = None
+    async def _scan_wifi(self):
         try:
-            gc.collect()
-            wlan = self._obtain_wlan()
-            if wlan is None:
-                if token is self._scan_token and self._active:
-                    self._set_status("WiFi unavailable (SELECT to retry)")
-                return
+            self.items = [("Scanning...", None)]
+            self.index = 0
+            self.offset = 0
+            self.render()
 
-            self._wlan = wlan
             try:
-                initial_active = wlan.active()
+                wlan = network.WLAN(network.STA_IF)
+            except Exception as exc:
+                self.items = [("WiFi error", None), (str(exc), None)]
+                self.render()
+                return
+
+            try:
+                wlan.active(True)
+                await asyncio.sleep_ms(100)
+                nets = wlan.scan()
             except Exception:
-                initial_active = None
-
-            if initial_active is False:
+                self.items = [("Scan failed", None), ("SELECT to retry", None)]
+                self.render()
+                return
+            finally:
                 try:
-                    wlan.active(True)
+                    wlan.active(False)
                 except Exception:
-                    if token is self._scan_token and self._active:
-                        self._set_status("Enable failed (SELECT to retry)")
-                    return
-                await asyncio.sleep_ms(200)
+                    pass
 
-            # The Pico W sometimes reports EINPROGRESS/-202 when the radio is
-            # busy.  Retry a few times before giving up.
-            found_nets = None
-            for attempt in range(5):
-                try:
-                    found_nets = wlan.scan()
-                    break
-                except OSError as exc:
-                    if exc.args and exc.args[0] in (-202, 110):
-                        await asyncio.sleep_ms(200)
-                        continue
-                    raise
-
-            if found_nets is None:
-                if token is self._scan_token and self._active:
-                    self._set_status("Scan timed out (SELECT to retry)")
+            if not nets:
+                self.items = [("No networks found", None), ("SELECT to retry", None)]
+                self.render()
                 return
 
-            if not found_nets:
-                if token is self._scan_token and self._active:
-                    self._set_status("No networks found (SELECT to retry)")
-                return
-
-            found_nets.sort(key=lambda x: x[3], reverse=True)
-            items = []
+            nets.sort(key=lambda entry: entry[3], reverse=True)
             auth_map = {0: " ", 1: "W", 2: "P", 3: "P", 4: "P"}
-            for entry in found_nets:
-                if len(entry) < 5:
-                    continue
-                ssid = entry[0]
-                rssi = entry[3]
-                authmode = entry[4]
+            items = []
+            for ssid, _, _, rssi, authmode, *_ in nets:
                 try:
                     ssid_str = ssid.decode("utf-8", "ignore")
                 except Exception:
@@ -965,50 +815,27 @@ class WifiScanScreen(ListScreen):
                 auth_char = auth_map.get(authmode, "?")
                 items.append(("{} {:>3} {}".format(auth_char, rssi, ssid_str[:15]), rssi))
 
-            if token is not self._scan_token or not self._active:
-                return
-
-            if not items:
-                self._set_status("Unsupported entries (SELECT to retry)")
-            else:
-                self.items = items
-                self.index = 0
-                self.offset = 0
-                self.render()
-
+            self.items = items or [("Unsupported entries", None)]
+            self.index = 0
+            self.offset = 0
+            self.render()
         except asyncio.CancelledError:
-            return
-        except Exception:
-            if token is self._scan_token and self._active:
-                self._set_status("Scan failed (SELECT to retry)")
+            pass
         finally:
-            if (token is self._scan_token and
-                    wlan is not None and initial_active is False):
-                # If the interface was originally inactive we disable it
-                # again to leave the radio as we found it.
-                try:
-                    wlan.active(False)
-                except Exception:
-                    pass
-            if token is self._scan_token:
-                self._scan_task = None
-
-    def _obtain_wlan(self):
-        if self._wlan:
-            return self._wlan
-
-        return get_shared_sta()
-
-    def on_back(self):
-        self._cancel_scan()
-        return BadgeScreen(self.oled)
+            self._scan_task = None
 
     def on_select(self, index):
         if self._scan_task and not self._scan_task.done():
             return self
-        if self.items and self.items[index][1] is None:
-            self._start_scan()
+
+        self._scan_task = asyncio.create_task(self._scan_wifi())
         return self
+
+    def on_back(self):
+        if self._scan_task:
+            self._scan_task.cancel()
+            self._scan_task = None
+        return BadgeScreen(self.oled)
 
 
 badge_screens = [("Fetch Name", FetchNameScreen),
@@ -1945,7 +1772,6 @@ async def main():
             apply_homeassistant_command,
             get_effect_names,
             (SSID, PASSWORD),
-            get_shared_sta(),
         )
         if ha_bridge:
             asyncio.create_task(ha_bridge.run())
