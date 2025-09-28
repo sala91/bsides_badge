@@ -41,3 +41,27 @@ mpremote <port> fs cp -r software/* :/
 ```
 
 If the code is already running on the badge and `mpremote` does not connect, hold `SELECT` button down while resetting your badge (pressing `RESET` button or toggling ON/OFF switch).
+
+### Home Assistant integration
+
+Create a file named `homeassistant.json` in the root of the badge filesystem to enable the optional MQTT integration.  The badge will automatically connect to WiFi (falling back to the BSides SSID/password when no custom credentials are provided), publish Home Assistant discovery information, and expose the LED ring as a controllable light entity.
+
+Example configuration:
+
+```
+{
+  "wifi": {
+    "ssid": "MyWiFi",
+    "password": "supersecret"
+  },
+  "mqtt": {
+    "broker": "192.168.1.10",
+    "port": 1883,
+    "username": "ha",
+    "password": "ha-pass",
+    "discovery_prefix": "homeassistant"
+  }
+}
+```
+
+Once connected, Home Assistant will show a light entity named after the badge ID.  The entity supports on/off, brightness, hue/saturation colour control and selecting any of the badge's LED effects.  Remote changes are persisted to `params.json`, while on-device adjustments immediately update the entity state.

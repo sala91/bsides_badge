@@ -12,6 +12,7 @@ from machine import Pin, I2C
 import ssd1306, neopixel
 import bsides_logo
 import math
+import homeassistant
 
 # Writer
 from writer.writer import Writer
@@ -130,6 +131,89 @@ def load_params():
     except OSError:
         # file not found, keep defaults
         pass
+
+
+def get_effect_names():
+    return [name for name, _ in led_effects] if led_effects else []
+
+
+def _clamp(value, minimum, maximum):
+    return max(minimum, min(maximum, value))
+
+
+def get_led_state_for_homeassistant():
+    effect_index = led_effect.value if led_effect.value < len(led_effects) else 0
+    effect_name = None
+    effect_list = get_effect_names()
+    if effect_index < len(effect_list):
+        effect_name = effect_list[effect_index]
+
+    brightness_255 = int((led_brightness.value * 255) / max(1, led_brightness.maxval))
+    return {
+        "effect_index": effect_index,
+        "effect_name": effect_name,
+        "brightness": _clamp(brightness_255, 0, 255),
+        "hue": _clamp(led_hue.value, 0, led_hue.maxval),
+        "saturation": _clamp(led_sat.value, 0, led_sat.maxval),
+        "speed": _clamp(led_speed.value, 0, led_speed.maxval),
+    }
+
+
+def apply_homeassistant_command(cmd):
+    changed = False
+
+    if "effect" in cmd:
+        effect_list = get_effect_names()
+        effect_value = cmd.get("effect")
+        new_idx = None
+        if isinstance(effect_value, int):
+            if 0 <= effect_value < len(effect_list):
+                new_idx = effect_value
+        elif isinstance(effect_value, str):
+            if effect_value in effect_list:
+                new_idx = effect_list.index(effect_value)
+        if new_idx is not None and led_effect.value != new_idx:
+            led_effect.value = new_idx
+            changed = True
+
+    if "brightness" in cmd:
+        try:
+            value = int(cmd["brightness"])
+            value = _clamp(value, 0, 255)
+            new_val = int((value * led_brightness.maxval) / 255)
+            new_val = _clamp(new_val, 0, led_brightness.maxval)
+            if led_brightness.value != new_val:
+                led_brightness.value = new_val
+                changed = True
+        except (ValueError, TypeError):
+            pass
+
+    hs_color = cmd.get("hs_color")
+    if isinstance(hs_color, (list, tuple)) and len(hs_color) >= 2:
+        try:
+            h = int(hs_color[0]) % 360
+            s = int(hs_color[1])
+            s = _clamp(s, 0, 100)
+            if led_hue.value != h or led_sat.value != s:
+                led_hue.value = h
+                led_sat.value = s
+                changed = True
+        except (ValueError, TypeError):
+            pass
+
+    if "speed" in cmd:
+        try:
+            new_speed = _clamp(int(cmd["speed"]), 0, led_speed.maxval)
+            if led_speed.value != new_speed:
+                led_speed.value = new_speed
+                changed = True
+        except (ValueError, TypeError):
+            pass
+
+    if changed:
+        save_params()
+
+    return changed
 
 # -----------------------
 # Username and ID
@@ -296,12 +380,21 @@ class ParamScreen(Screen):
         self.oled.show()
 
     async def handle_button(self, btn):
+        changed = False
         if btn == BTN_NEXT and (self.wraparound or self.param.value < self.param.maxval):
-            self.param.value = (self.param.value + 1) % (self.param.maxval + 1)
+            new_val = (self.param.value + 1) % (self.param.maxval + 1)
+            if new_val != self.param.value:
+                self.param.value = new_val
+                changed = True
         elif btn == BTN_PREV and (self.wraparound or self.param.value > 0):
-            self.param.value = (self.param.value - 1) % (self.param.maxval + 1)
+            new_val = (self.param.value - 1) % (self.param.maxval + 1)
+            if new_val != self.param.value:
+                self.param.value = new_val
+                changed = True
         elif btn in (BTN_SELECT, BTN_BACK):
             return self.returnscreen(self.oled)
+        if changed:
+            homeassistant.notify_led_state()
         return self
 
 class BrightnessScreen(ParamScreen):
@@ -380,6 +473,7 @@ class EffectScreen(ListScreen):
     def on_select(self, index):
         global led_effect
         led_effect.value = index
+        homeassistant.notify_led_state()
         return self
 
     def on_back(self):
@@ -666,7 +760,59 @@ class CodeRepoScreen(Screen):
 
         self.oled.show()
 
+class WifiScanScreen(ListScreen):
+    def __init__(self, oled):
+        super().__init__(oled, "WiFi Networks", [("Scanning...", None)])
+        self.wlan = None
+        asyncio.create_task(self._scan_wifi())
+
+    async def _scan_wifi(self):
+        self.items = [("Scanning...", None)]
+        self.render()
+
+        if self.wlan is None:
+            self.wlan = network.WLAN(network.STA_IF)
+
+        self.wlan.active(True)
+        await asyncio.sleep_ms(100)
+
+        try:
+            found_nets = self.wlan.scan()
+        except Exception:
+            self.items = [("Scan Error", None)]
+            self.render()
+            return
+        finally:
+            self.wlan.active(False)
+
+        if not found_nets:
+            self.items = [("No networks found", None)]
+        else:
+            found_nets.sort(key=lambda x: x[3], reverse=True)
+            self.items = []
+            auth_map = {0: " ", 1: "W", 2: "P", 3: "P", 4: "P"}
+            for ssid, _, _, rssi, authmode, _ in found_nets:
+                try:
+                    ssid_str = ssid.decode("utf-8", "ignore")
+                except Exception:
+                    ssid_str = "???"
+                auth_char = auth_map.get(authmode, "?")
+                label = "{} {:>3} {}".format(auth_char, rssi, ssid_str[:15])
+                self.items.append((label, rssi))
+
+        self.index = 0
+        self.offset = 0
+        self.render()
+
+    def on_back(self):
+        return BadgeScreen(self.oled)
+
+    def on_select(self, index):
+        return self
+
+
 badge_screens = [("Fetch Name", FetchNameScreen),
+                 ("Scan WiFi", WifiScanScreen),
                  ("Code git", CodeRepoScreen)]
 
 class BadgeScreen(ListScreen):
@@ -1377,6 +1523,70 @@ def led_eff_spiral_spin(np, oldstate):
     return state
 
 
+def led_eff_olympic(np, oldstate):
+    """Olympic rings inspired segments that slowly rotate around the ring."""
+    state = oldstate or {"phase": 0.0}
+    n = len(np)
+
+    if n == 0:
+        return state
+
+    olympic_colors = [240, 60, 0, 120, 360]  # blue, yellow, black, green, red
+    ring_size = n / 5
+    s = led_sat.value / 100
+    v = led_brightness.value / 100
+
+    for i in range(n):
+        rotated_pos = (i + state["phase"]) % n
+        ring_index = int(rotated_pos / ring_size) % 5
+        ring_pos = (rotated_pos % ring_size) / ring_size
+
+        brightness_mult = 0.3 + 0.7 * (0.5 * (1 + math.sin(ring_pos * 2 * math.pi)))
+
+        if ring_index == 2:
+            dim = int(255 * v * brightness_mult * 0.2)
+            np[i] = (dim, dim, dim)
+        else:
+            hue = olympic_colors[ring_index] % 360
+            np[i] = hsv_to_rgb(hue, s, v * brightness_mult)
+
+    state["phase"] = (state["phase"] + led_speed.value / 300.0) % n
+    return state
+
+
+def led_eff_police(np, oldstate):
+    """Alternating red and blue strobes reminiscent of police lights."""
+    state = oldstate or {"phase": 0}
+    n = len(np)
+
+    if n == 0:
+        return state
+
+    half_size = n // 2
+    phase = state["phase"]
+
+    s = led_sat.value / 100
+    v = led_brightness.value / 100
+    red = hsv_to_rgb(0, s, v)
+    blue = hsv_to_rgb(240, s, v)
+    off = (0, 0, 0)
+
+    np.fill(off)
+
+    if 0 <= phase < 25:
+        for i in range(half_size):
+            np[i] = red
+    elif 50 <= phase < 75:
+        for i in range(half_size, n):
+            np[i] = blue
+
+    increment = int(led_speed.value / 10)
+    if increment < 1:
+        increment = 1
+    state["phase"] = (phase + increment) % 100
+    return state
+
+
 async def neopixel_task(np):
     global led_effect
     global led_effects
@@ -1389,10 +1599,16 @@ async def neopixel_task(np):
                    ("Comet", led_eff_comet),
                    ("Rainbow Comet", led_eff_rainbow_comet),
                    ("Ping-Pong", led_eff_ping_pong),
-                   ("Dual Hue", led_eff_dual_hue),        
+                   ("Dual Hue", led_eff_dual_hue),
                    ("Aurora", led_eff_aurora),
                    ("Spiral Spin", led_eff_spiral_spin),
+                   ("Olympic", led_eff_olympic),
+                   ("Police", led_eff_police),
                    ("Cycle_All", led_eff_autocycle)]
+
+    led_effect.maxval = len(led_effects) - 1
+
+    homeassistant.notify_effect_list()
 
     while True:
         if led_startup == True:
@@ -1520,6 +1736,16 @@ async def main():
     load_params()
     show_bsides_logo(oled)
     print("Username: {}".format(USERNAME))
+
+    ha_bridge = homeassistant.initialize(
+        device_id,
+        get_led_state_for_homeassistant,
+        apply_homeassistant_command,
+        get_effect_names,
+        (SSID, PASSWORD),
+    )
+    if ha_bridge:
+        asyncio.create_task(ha_bridge.run())
 
     await asyncio.gather(ui_task(oled), inactivity_task(oled), neopixel_task(np))
 
