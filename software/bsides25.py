@@ -601,7 +601,45 @@ class StopwatchScreen(Screen):
     _paused_base = 0
 
 
-utils_screens = [("Stopwatch", StopwatchScreen)]
+class MemCheckScreen(Screen):
+    def __init__(self, oled):
+        super().__init__(oled)
+        self.render()
+
+    def render(self):
+        self.oled.fill(0)
+        mem_free = gc.mem_free()
+        
+        # Title
+        wri10.set_textpos(self.oled, 0, 0)
+        wri10.printstring("Memory Info")
+        
+        # Current free memory
+        wri10.set_textpos(self.oled, 20, 0)
+        wri10.printstring(f"Free: {mem_free}")
+        
+        # Force GC and show difference
+        gc.collect()
+        mem_after = gc.mem_free()
+        diff = mem_after - mem_free
+        
+        wri10.set_textpos(self.oled, 35, 0)
+        wri10.printstring(f"After GC: {mem_after}")
+        wri10.set_textpos(self.oled, 50, 0)
+        wri10.printstring(f"Freed: {diff}")
+        
+        self.oled.show()
+
+    async def handle_button(self, btn):
+        if btn == BTN_SELECT:
+            self.render()  # Refresh stats
+        elif btn == BTN_BACK:
+            return UtilsScreen(self.oled)
+        return self
+utils_screens = [
+    ("Stopwatch", StopwatchScreen),
+    ("Memory Check", MemCheckScreen),
+]
 
 class UtilsScreen(ListScreen):
     def __init__(self, oled):
