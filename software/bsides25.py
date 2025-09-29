@@ -1832,7 +1832,8 @@ async def main():
 
     await asyncio.gather(ui_task(oled), inactivity_task(oled), neopixel_task(np))
 
-try:
-    asyncio.run(main())
-finally:
-    asyncio.new_event_loop()
+if os.getenv("BSIDES_BADGE_SKIP_MAIN") != "1":
+    try:
+        asyncio.run(main())
+    finally:
+        asyncio.new_event_loop()

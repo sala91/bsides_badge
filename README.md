@@ -95,3 +95,13 @@ To use the default BSides Wi-Fi credentials instead of providing your own SSID, 
 ```
 
 Once connected, Home Assistant will show a light entity named after the badge ID.  The entity supports on/off, brightness, hue/saturation colour control and selecting any of the badge's LED effects.  Remote changes are persisted to `params.json`, while on-device adjustments immediately update the entity state.
+
+## Testing
+
+To run the MicroPython-oriented unit tests on a development machine, use:
+
+```bash
+./run_tests_badge.sh
+```
+
+The script wraps `pytest` and sets up stubbed hardware modules so the badge firmware can be exercised without Wi-Fi hardware.
