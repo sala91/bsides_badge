@@ -1832,7 +1832,19 @@ async def main():
 
     await asyncio.gather(ui_task(oled), inactivity_task(oled), neopixel_task(np))
 
-if os.getenv("BSIDES_BADGE_SKIP_MAIN") != "1":
+_getenv = getattr(os, "getenv", None)
+if _getenv is None and hasattr(os, "environ"):
+    _getenv = os.environ.get
+
+skip_main = False
+if _getenv is not None:
+    try:
+        skip_main = _getenv("BSIDES_BADGE_SKIP_MAIN") == "1"
+    except (TypeError, AttributeError):
+        # MicroPython's minimal getenv may not accept keyword args or may be stubbed.
+        skip_main = False
+
+if not skip_main:
     try:
         asyncio.run(main())
     finally:
