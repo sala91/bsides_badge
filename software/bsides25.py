@@ -19,6 +19,9 @@ try:
 except ImportError:
     homeassistant = None
 
+# Config
+from lib.config import get_config
+
 # Writer
 from writer.writer import Writer
 import writer.freesans20 as freesans20
@@ -51,10 +54,12 @@ REPEAT_INTERVAL = 10  # ms between repeats
 INACTIVITY_TIMEOUT = 5000  # ms
 LOGO_PERIOD = 3000  # ms
 
-SSID = "bsides-badge"
-PASSWORD = "bsidestallinn"
-URL = "https://badge.bsides.ee"
-URL_QR = "badge.bsides.ee"
+# Load configuration
+config = get_config()
+SSID = config.wifi_ssid
+PASSWORD = config.wifi_password
+URL = config.wifi_url
+URL_QR = config.wifi_url_qr
 
 _network_mgr = None
 
@@ -1876,7 +1881,7 @@ async def main():
     show_bsides_logo(oled)
     print("Username: {}".format(USERNAME))
 
-    if homeassistant:
+    if homeassistant and config.homeassistant_enabled:
         ha_bridge = homeassistant.initialize(
             device_id,
             get_led_state_for_homeassistant,

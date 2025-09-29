@@ -1,10 +1,10 @@
-# BSides Tallinn Badge – Agent Notes
+# BSides Tallinn Badge – Claude Code Notes
 
-These notes target the badge hardware so agents can build firmware quickly and safely. Keep memory pressure low and reuse shared objects.
+These notes target the badge hardware so Claude Code can build firmware quickly and safely. Keep memory pressure low and reuse shared objects.
 
 ## MCU & Firmware
 - **MCU:** ESP32‑C3FH4 (4 MB flash, 400kB ram, 2.4Ggz RISC-V core, integrated Wi‑Fi/BLE). 
-- **Baseline firmware:** `ESP32_GENERIC_C3-20250911-v1.26.1.bin` (MicroPython v1.26.1).
+- **Baseline firmware:** `ESP32_GENERIC_C3-20250911-v1.26.1.bin` (MicroPython v1.26.1). 
 - **Heap discipline:** Avoid dynamic allocation inside loops; pre‑allocate buffers; prefer `bytearray` over `bytes`; reuse global singletons (Wi‑Fi, I2C, NeoPixel).
 
 ##  ESP32-C3 Wi-Fi Feature List
@@ -44,7 +44,7 @@ For more info on networking see [Espressif](https://docs.espressif.com/projects/
 - **USB‑C:** CC resistors for sink; D+/D‑ routed to the MCU; ferrite/TVS filtering present.
 
 ### LED Current Budget
-- 16 × WS2812 worst‑case ≈ **960 mA** (60 mA/LED at full‑white). Cap brightness (e.g., 64/255) unless USB power is stable. Consider per‑frame power limiting.
+- 16 × WS2812 worst‑case ≈ **960 mA** (60 mA/LED at full‑white). Cap brightness (e.g., 64/255) unless USB power is stable. Consider per‑frame power limiting.
 
 ## Boot & Flashing
 - Native USB works for flashing/REPL.
@@ -76,10 +76,10 @@ For more info on networking see [Espressif](https://docs.espressif.com/projects/
   np.buf = buf          # if using a patched driver; else set per‑pixel then np.write()
   np.write()
   ```
-- **Buttons:** Configure with input + pull‑down (or pull‑up, but mind boot pins). Debounce in software (e.g., 10–20 ms) or use uasyncio edge tasks.
+- **Buttons:** Configure with input + pull‑down (or pull‑up, but mind boot pins). Debounce in software (e.g., 10–20 ms) or use uasyncio edge tasks.
 
 ## Wi‑Fi & BLE
-- Keep a **single global** Wi‑Fi station (don’t repeatedly `WLAN()`); cache credentials; reuse sockets.
+- Keep a **single global** Wi‑Fi station (don't repeatedly `WLAN()`); cache credentials; reuse sockets.
 - For BLE beacons, throttle allocations; use pre‑built advertising payloads.
 
 ## Memory & Perf Tips
@@ -89,15 +89,14 @@ For more info on networking see [Espressif](https://docs.espressif.com/projects/
 - Prefer integer math and table lookups over `math.sin` in tight loops.
 
 ## Known gotchas
-- **GPIO9**: don’t drive as output; it’s a bootstrap. Keep pull‑ups/downs consistent across reset.
+- **GPIO9**: don't drive as output; it's a bootstrap. Keep pull‑ups/downs consistent across reset.
 - **Buttons on 4/5/8/9**: these share SPI/boot roles—configure with gentler pulls and debounce to avoid spurious boots.
 - **LEDs**: Excessive white can brown‑out on weak USB sources.
-
----
-*Edit this page as the single source of truth. Keep it tight, pragmatic, and agent‑friendly.*
-
 
 ## Testing
 - Use the repository root script `./run_tests_badge.sh` (which wraps `pytest`) before sending firmware patches.
 - Tests rely on stubbed MicroPython modules; keep the `BSIDES_BADGE_SKIP_MAIN` environment guard in `bsides25.py` intact or the test harness will execute the event loop.
 - Place new unit tests under `tests/` and extend the fixtures there instead of importing hardware drivers directly.
+
+---
+*Edit this page as the single source of truth. Keep it tight, pragmatic, and Claude Code-friendly.*

@@ -15,6 +15,37 @@ The code in `software` is written in MicroPython and loaded onto the badge via U
 
 Update the code by uploading via `mpremote` or directly via some IDE like [Thonny](https://thonny.org/). If you go [Visual Studio Code](https://code.visualstudio.com) route, you might want to check Python (ms-python.python), Pylance (ms-python.vscode-pylance), MicroPico, Micropython IDE, MPRemote / ESPTool wrappers, GitLens, EditorConfig, Bracket Pair Colorizer / Rainbow Brackets, Tabnine / Copilot extensions.
 
+### Configuration
+
+Before using WiFi features, copy `software/config.json.example` to `software/config.json` and update the settings:
+
+```bash
+cp software/config.json.example software/config.json
+```
+
+Edit `config.json` to configure:
+- **WiFi settings**: SSID, password, badge server URL
+- **Home Assistant**: MQTT broker settings (optional)
+- **Badge behavior**: Auto-connect, debug mode, etc.
+
+Example configuration:
+```json
+{
+  "wifi": {
+    "ssid": "your-wifi-network",
+    "password": "your-wifi-password",
+    "url": "https://badge.bsides.ee",
+    "url_qr": "badge.bsides.ee"
+  },
+  "badge": {
+    "auto_connect": false,
+    "debug": true
+  }
+}
+```
+
+**Note**: WiFi scanning works without configuration, but connecting and fetching names requires valid WiFi credentials.
+
 ## Device preparation
 
 ```
@@ -51,37 +82,6 @@ BACK - Back to the menu
 ## Home Assistant integration
 
 Create a file named `homeassistant.json` in the root of the badge filesystem to enable the optional MQTT integration.  When Wi-Fi credentials are supplied the badge will connect automatically, publish Home Assistant discovery information, and expose the LED ring as a controllable light entity.  If you would like the bridge to reuse the built-in BSides SSID/password, set `"use_defaults": true` inside the `wifi` block; otherwise the bridge waits for an existing connection (for example, one initiated from the Fetch Name workflow).
-
-Example configuration:
-
-```
-{
-  "wifi": {
-    "ssid": "MyWiFi",
-    "password": "supersecret"
-  },
-  "mqtt": {
-    "broker": "192.168.1.10",
-    "port": 1883,
-    "username": "ha",
-    "password": "ha-pass",
-    "discovery_prefix": "homeassistant"
-  }
-}
-```
-
-To use the default BSides Wi-Fi credentials instead of providing your own SSID, supply an empty `wifi` block with `"use_defaults": true`.
-
-```
-{
-  "wifi": {
-    "use_defaults": true
-  },
-  "mqtt": {
-    "broker": "192.168.1.10"
-  }
-}
-```
 
 Once connected, Home Assistant will show a light entity named after the badge ID.  The entity supports on/off, brightness, hue/saturation colour control and selecting any of the badge's LED effects.  Remote changes are persisted to `params.json`, while on-device adjustments immediately update the entity state.
 
