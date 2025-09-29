@@ -16,31 +16,27 @@ USB-C for flashing/charging
 
 The code in `software` is written in MicroPython and loaded onto the badge via USB-C connector.
 
-Update the code by uploading via `mpremote` or directly via some IDE like [Thonny](https://thonny.org/).
+Update the code by uploading via `mpremote` or directly via some IDE like [Thonny](https://thonny.org/). If you go [Visual Studio Code](https://code.visualstudio.com) route, you might want to check Python (ms-python.python), Pylance (ms-python.vscode-pylance), MicroPico, Micropython IDE, MPRemote / ESPTool wrappers, GitLens, EditorConfig, Bracket Pair Colorizer / Rainbow Brackets, Tabnine / Copilot extensions.
 
 ## Device preparation
 
-Install `esptool` and `mpremote`
 ```
-pip install --user esptool mpremote
-```
-
-Install [MicroPython](https://micropython.org/download/ESP32_GENERIC_C3).
-
-For BSides 2025: v1.26.1 (2025-09-11)
-```
+brew install pipx python wget
+pipx ensurepath
+pipx install esptool
+pipx install mpremote
+pipx install pytest
+mkdir -p ~/Downloads/mp && cd ~/Downloads/mp
 wget https://micropython.org/resources/firmware/ESP32_GENERIC_C3-20250911-v1.26.1.bin
-esptool --port <port> erase_flash
-esptool --port <port> --baud 921600 write_flash 0 ESP32_GENERIC_C3-20250911-v1.26.1.bin
 ```
-
-## Copy files to the badge
-
-```
-mpremote <port> fs cp -r software/* :/
-```
+After that use flash_badge.sh for Format and Install and sync_badge.sh for just updating the files.
 
 If the code is already running on the badge and `mpremote` does not connect, hold `SELECT` button down while resetting your badge (pressing `RESET` button or toggling ON/OFF switch).
+
+## Running tests
+```
+./run_tests_badge.sh -q
+```
 
 ### Badge setup utilities
 
@@ -95,3 +91,13 @@ To use the default BSides Wi-Fi credentials instead of providing your own SSID, 
 ```
 
 Once connected, Home Assistant will show a light entity named after the badge ID.  The entity supports on/off, brightness, hue/saturation colour control and selecting any of the badge's LED effects.  Remote changes are persisted to `params.json`, while on-device adjustments immediately update the entity state.
+
+## Testing
+
+To run the MicroPython-oriented unit tests on a development machine, use:
+
+```bash
+./run_tests_badge.sh
+```
+
+The script wraps `pytest` and sets up stubbed hardware modules so the badge firmware can be exercised without Wi-Fi hardware.

@@ -79,3 +79,8 @@ These notes target the badge hardware so agents can build firmware quickly and s
 ---
 *Edit this page as the single source of truth. Keep it tight, pragmatic, and agent‑friendly.*
 
+
+## Testing
+- Use the repository root script `./run_tests_badge.sh` (which wraps `pytest`) before sending firmware patches.
+- Tests rely on stubbed MicroPython modules; keep the `BSIDES_BADGE_SKIP_MAIN` environment guard in `bsides25.py` intact or the test harness will execute the event loop.
+- Place new unit tests under `tests/` and extend the fixtures there instead of importing hardware drivers directly.
