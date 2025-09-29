@@ -1,3 +1,4 @@
+import errno
 import sys
 from pathlib import Path
 
@@ -39,7 +40,7 @@ class _MemorySavingWLAN(_BaseStubWLAN):
     def scan(self):
         if self._channel == 0:
             self._full_scan_attempts += 1
-            raise MemoryError("ENOMEM")
+            raise OSError(errno.ENOMEM, "wifi out of memory")
         return self._channel_results.get(self._channel, [])
 
 
@@ -61,7 +62,7 @@ class _NoConfigWLAN:
 
     def scan(self):
         if self._fail:
-            raise MemoryError("ENOMEM")
+            raise OSError(errno.ENOMEM, "wifi out of memory")
         return self._results
 
 
@@ -69,13 +70,16 @@ def test_scan_wifi_by_channel_sets_channel_and_restores():
     wlan = _BaseStubWLAN()
     wlan._channel = 6
 
+    diagnostics = []
     results = scan_wifi_by_channel(
         wlan,
         11,
+        diagnostics=diagnostics,
     )
 
     assert wlan._channel == 6  # restored to original
     assert results == []
+    assert diagnostics == []
 
 
 def test_scan_wifi_networks_fallback_collects_results():
@@ -118,11 +122,31 @@ def test_scan_wifi_networks_deduplicates_bssid():
 def test_scan_wifi_by_channel_without_config_returns_none():
     wlan = _NoConfigWLAN([(b"ssid", b"\x01", 1, -40, 0)])
 
-    assert scan_wifi_by_channel(wlan, 1) is None
+    diagnostics = []
+
+    assert scan_wifi_by_channel(wlan, 1, diagnostics=diagnostics) is None
+    assert diagnostics
 
 
 def test_scan_wifi_networks_raises_when_no_fallback():
     wlan = _NoConfigWLAN([(b"ssid", b"\x01", 1, -40, 0)], fail=True)
 
-    with pytest.raises(MemoryError):
+    with pytest.raises(RuntimeError) as excinfo:
         scan_wifi_networks(wlan)
+
+    message = str(excinfo.value)
+    assert "full scan attempt" in message
+    assert "channel" in message
+
+
+def test_scan_wifi_networks_raises_other_errors():
+    class _FailingWLAN(_BaseStubWLAN):
+        def scan(self):
+            raise OSError(errno.EIO, "wifi internal error")
+
+    wlan = _FailingWLAN()
+
+    with pytest.raises(OSError) as excinfo:
+        scan_wifi_networks(wlan)
+
+    assert excinfo.value.errno == errno.EIO

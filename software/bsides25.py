@@ -9,6 +9,7 @@ import json
 import uasyncio as asyncio
 import time, micropython
 import gc
+import errno
 from machine import Pin, I2C
 import ssd1306, neopixel
 import bsides_logo
@@ -83,47 +84,130 @@ def get_shared_wlan():
 
 if not callable(_scan_wifi_by_channel) or not callable(_scan_wifi_networks):
 
+    _KNOWN_ENOMEM = {getattr(errno, "ENOMEM", 12), 12}
     _WLAN_CHANNEL_UNSET = object()
 
-    def _scan_wifi_by_channel(wlan, channel):
-        """Attempt to scan a single channel by reconfiguring the interface."""
+    def _format_wifi_exception(exc):
+        if isinstance(exc, OSError):
+            parts = []
+            err = getattr(exc, "errno", None)
+            if err is not None:
+                parts.append("errno={}".format(err))
+            for arg in exc.args[1:]:
+                if isinstance(arg, str) and arg:
+                    parts.append(arg)
+            if not parts and exc.args:
+                parts.append(str(exc.args[0]))
+            detail = ", ".join(parts) if parts else exc.__class__.__name__
+            return "{}({})".format(exc.__class__.__name__, detail)
 
+        text = str(exc)
+        return "{}({})".format(exc.__class__.__name__, text) if text else exc.__class__.__name__
+
+
+    def _is_memory_related(exc):
+        if isinstance(exc, MemoryError):
+            return True
+        if isinstance(exc, OSError):
+            err = getattr(exc, "errno", None)
+            if err in _KNOWN_ENOMEM:
+                return True
+            text = " ".join(str(arg) for arg in exc.args if isinstance(arg, str)).lower()
+            if "out of memory" in text or "enomem" in text:
+                return True
+        return False
+
+
+    def _set_channel_via_config(wlan, channel, diagnostics=None):
         if not hasattr(wlan, "config"):
-            return None
+            if diagnostics is not None:
+                diagnostics.append("WLAN.config attribute missing")
+            return False, None
 
         config = getattr(wlan, "config", None)
         if not callable(config):
-            return None
+            if diagnostics is not None:
+                diagnostics.append("WLAN.config is not callable")
+            return False, None
 
         previous = _WLAN_CHANNEL_UNSET
         try:
             previous = config("channel")
-        except Exception:
-            previous = _WLAN_CHANNEL_UNSET
+        except Exception as exc:
+            if diagnostics is not None:
+                diagnostics.append(
+                    "reading current channel failed: {}".format(_format_wifi_exception(exc))
+                )
 
         try:
+            config(channel=channel)
+        except TypeError:
             try:
-                config(channel=channel)
-            except TypeError:
                 config("channel", channel)
-        except Exception:
+            except Exception as exc:
+                if diagnostics is not None:
+                    diagnostics.append(
+                        "setting channel via positional arguments failed: {}".format(
+                            _format_wifi_exception(exc)
+                        )
+                    )
+                return False, None
+        except Exception as exc:
+            if diagnostics is not None:
+                diagnostics.append("setting channel failed: {}".format(_format_wifi_exception(exc)))
+            return False, None
+
+        restored_value = None if previous is _WLAN_CHANNEL_UNSET else previous
+        return True, restored_value
+
+
+    def _restore_channel(wlan, previous, diagnostics=None):
+        if previous is None:
+            return
+
+        try:
+            wlan.config(channel=previous)
+        except TypeError:
+            try:
+                wlan.config("channel", previous)
+            except Exception as exc:
+                if diagnostics is not None:
+                    diagnostics.append(
+                        "restoring channel via positional arguments failed: {}".format(
+                            _format_wifi_exception(exc)
+                        )
+                    )
+        except Exception as exc:
+            if diagnostics is not None:
+                diagnostics.append("restoring channel failed: {}".format(_format_wifi_exception(exc)))
+
+
+    def _scan_wifi_by_channel(wlan, channel, diagnostics=None):
+        """Attempt to scan a single channel by reconfiguring the interface."""
+
+        supported, previous = _set_channel_via_config(wlan, channel, diagnostics)
+        if not supported:
             return None
 
         try:
             results = wlan.scan()
-        except MemoryError:
-            results = []
+        except Exception as exc:
+            if _is_memory_related(exc):
+                if diagnostics is not None:
+                    diagnostics.append(
+                        "scan on channel {} exhausted memory: {}".format(
+                            channel, _format_wifi_exception(exc)
+                        )
+                    )
+                results = []
+            else:
+                if diagnostics is not None:
+                    diagnostics.append(
+                        "scan on channel {} failed: {}".format(channel, _format_wifi_exception(exc))
+                    )
+                raise
         finally:
-            if previous is not _WLAN_CHANNEL_UNSET:
-                try:
-                    config(channel=previous)
-                except TypeError:
-                    try:
-                        config("channel", previous)
-                    except Exception:
-                        pass
-                except Exception:
-                    pass
+            _restore_channel(wlan, previous, diagnostics)
 
         return list(results or [])
 
@@ -131,21 +215,44 @@ if not callable(_scan_wifi_by_channel) or not callable(_scan_wifi_networks):
     def _scan_wifi_networks(wlan, channels=DEFAULT_WIFI_CHANNELS):
         """Scan for networks with a per-channel fallback on ENOMEM."""
 
-        try:
-            return list(wlan.scan())
-        except MemoryError:
-            gc.collect()
+        attempts = []
+        for attempt in (1, 2):
             try:
                 return list(wlan.scan())
-            except MemoryError:
-                pass
+            except Exception as exc:
+                if _is_memory_related(exc):
+                    attempts.append(
+                        "full scan attempt {}: {}".format(attempt, _format_wifi_exception(exc))
+                    )
+                    if attempt == 1:
+                        gc.collect()
+                        continue
+                    break
+                raise
 
         dedup = {}
         per_channel_supported = False
+        per_channel_failures = []
 
         for channel in channels:
-            channel_results = _scan_wifi_by_channel(wlan, channel)
+            channel_diag = []
+            try:
+                channel_results = _scan_wifi_by_channel(wlan, channel, diagnostics=channel_diag)
+            except Exception as exc:
+                per_channel_failures.append(
+                    "channel {}: {}".format(channel, _format_wifi_exception(exc))
+                )
+                continue
+
             if channel_results is None:
+                if channel_diag:
+                    per_channel_failures.append(
+                        "channel {}: {}".format(channel, "; ".join(channel_diag))
+                    )
+                else:
+                    per_channel_failures.append(
+                        "channel {}: channel switching unsupported".format(channel)
+                    )
                 continue
 
             per_channel_supported = True
@@ -157,10 +264,16 @@ if not callable(_scan_wifi_by_channel) or not callable(_scan_wifi_networks):
                 if existing is None or entry[3] > existing[3]:
                     dedup[bssid] = entry
 
-        if not per_channel_supported:
-            raise MemoryError("per-channel scanning unavailable")
+        if per_channel_supported:
+            return list(dedup.values())
 
-        return list(dedup.values())
+        details = attempts + per_channel_failures
+        if not details:
+            details.append("no scanning methods succeeded")
+        raise RuntimeError(
+            "Wi-Fi scan failed after attempting per-channel fallback: "
+            + "; ".join(details)
+        )
 
 # -----------------------
 # Globals
@@ -923,22 +1036,30 @@ class WifiScanScreen(ListScreen):
                 self.render()
                 return
 
-            try:
-                already_active = wlan.active()
-                gc.collect()
-                wlan.active(True)
-                await asyncio.sleep_ms(100)
                 try:
-                    if _scan_wifi_networks:
-                        nets = _scan_wifi_networks(wlan)
-                    else:
-                        nets = wlan.scan()
-                except MemoryError:
-                    self.items = [("WiFi error", None), ("Out of memory", None), ("BACK to exit", None)]
-                    self.render()
-                    return
-            except Exception:
-                self.items = [("Scan failed", None), ("SELECT to retry", None)]
+                    already_active = wlan.active()
+                    gc.collect()
+                    wlan.active(True)
+                    await asyncio.sleep_ms(100)
+                    try:
+                        if _scan_wifi_networks:
+                            nets = _scan_wifi_networks(wlan)
+                        else:
+                            nets = wlan.scan()
+                    except Exception as exc:
+                        detail = str(exc) or getattr(exc, "args", [""])[0] or exc.__class__.__name__
+                        lines = [("WiFi error", None)]
+                        for part in detail.split("; "):
+                            if not part:
+                                continue
+                            lines.append((part[:21], None))
+                        lines.append(("BACK to exit", None))
+                        self.items = lines
+                        self.render()
+                        return
+            except Exception as exc:
+                detail = str(exc) or getattr(exc, "args", [""])[0] or exc.__class__.__name__
+                self.items = [("Scan failed", None), (detail[:21], None), ("SELECT to retry", None)]
                 self.render()
                 return
             finally:
