@@ -9,15 +9,43 @@ import json
 import uasyncio as asyncio
 import time, micropython
 import gc
+try:
+    import errno
+except ImportError:  # pragma: no cover - MicroPython always provides errno
+    errno = type("errno", (), {"ENOMEM": 12})
 from machine import Pin, I2C
 import ssd1306, neopixel
 import bsides_logo
 import math
 
-try:
-    import homeassistant
-except ImportError:
-    homeassistant = None
+homeassistant = None
+_homeassistant_checked = False
+
+
+def ensure_homeassistant_loaded():
+    """Import the optional Home Assistant bridge only when configured."""
+
+    global homeassistant, _homeassistant_checked
+
+    if _homeassistant_checked:
+        return homeassistant
+
+    _homeassistant_checked = True
+
+    try:
+        os.stat("homeassistant.json")
+    except OSError:
+        homeassistant = None
+        return None
+
+    try:
+        import homeassistant as ha_mod  # type: ignore
+    except ImportError:
+        homeassistant = None
+        return None
+
+    homeassistant = ha_mod
+    return homeassistant
 
 # Writer
 from writer.writer import Writer
@@ -57,6 +85,83 @@ URL = "https://badge.bsides.ee"
 URL_QR = "badge.bsides.ee"
 
 _shared_wlan = None
+_SCAN_CHANNELS = tuple(range(1, 14))
+
+
+class WifiScanFailure(RuntimeError):
+    """Raised when the Wi-Fi scan pipeline exhausts its recovery strategies."""
+
+    def __init__(self, attempts):
+        self.attempts = attempts or []
+        message = self._build_message()
+        super().__init__(message)
+
+    def _build_message(self):
+        if not self.attempts:
+            return "Scan failed"
+
+        lines = ["Scan failed"]
+        for step, exc in self.attempts:
+            lines.append("{}: {}".format(step, _describe_exception(exc)))
+        return "\n".join(lines)
+
+    def summary_lines(self, max_len=20, limit=6):
+        """Return wrapped status lines that fit on the OLED display."""
+
+        lines = []
+        for step, exc in self.attempts:
+            detail = "{}: {}".format(step, _describe_exception(exc))
+            chunks = _split_display_message(detail, max_len=max_len)
+            for chunk in chunks:
+                lines.append(chunk)
+                if len(lines) >= limit:
+                    return lines[:limit]
+        return lines[:limit]
+
+
+def _is_enomem_error(exc):
+    """Return ``True`` when *exc* represents an out-of-memory condition."""
+
+    if isinstance(exc, MemoryError):
+        return True
+
+    if isinstance(exc, OSError):
+        err_no = getattr(exc, "errno", None)
+        if err_no is None and exc.args:
+            first = exc.args[0]
+            if isinstance(first, int):
+                err_no = first
+        return err_no == getattr(errno, "ENOMEM", 12)
+
+    return False
+
+
+def _describe_exception(exc):
+    """Return a short text description for *exc* suitable for logs/UI."""
+
+    if isinstance(exc, WifiScanFailure):
+        return str(exc) or exc.__class__.__name__
+
+    if isinstance(exc, MemoryError):
+        return "MemoryError"
+
+    if isinstance(exc, OSError):
+        err_no = getattr(exc, "errno", None)
+        if err_no is None and exc.args:
+            first = exc.args[0]
+            if isinstance(first, int):
+                err_no = first
+        msg = str(exc)
+        if err_no is not None:
+            if msg:
+                return "OSError {} ({})".format(err_no, msg)
+            return "OSError {}".format(err_no)
+        return msg or "OSError"
+
+    msg = str(exc)
+    if msg:
+        return msg
+    return exc.__class__.__name__
 
 
 def get_shared_wlan():
@@ -68,6 +173,329 @@ def get_shared_wlan():
         gc.collect()
         _shared_wlan = network.WLAN(network.STA_IF)
     return _shared_wlan
+
+
+def _merge_scan_entries(entries, *, results, seen, max_results):
+    limited = False
+
+    if not entries:
+        return limited
+
+    for entry in entries:
+        if len(entry) < 2:
+            continue
+        bssid = entry[1]
+        if bssid in seen:
+            continue
+        seen.add(bssid)
+        results.append(entry)
+        if len(results) >= max_results:
+            limited = True
+            break
+
+    return limited
+
+
+def _collate_scan_results(entries, *, max_results=24):
+    results = []
+    seen = set()
+    limited = _merge_scan_entries(entries, results=results, seen=seen, max_results=max_results)
+    return results, limited
+
+
+def _scan_wifi_networks(wlan, *, max_results=24):
+    """Return scan results while handling driver failures gracefully."""
+
+    attempt_log = []
+
+    def record(step, exc):
+        attempt_log.append((step, exc))
+
+    try:
+        gc.collect()
+        entries = wlan.scan()
+    except Exception as exc:
+        record("full scan", exc)
+    else:
+        results, limited = _collate_scan_results(entries, max_results=max_results)
+        return results, limited, None
+
+    per_channel = _scan_wifi_by_channel(wlan, max_results=max_results, attempt_log=attempt_log)
+    if per_channel is not None:
+        results, limited = per_channel
+        return results, limited, None
+
+    replacement = _reset_sta_interface(wlan, attempt_log)
+    if replacement is not None:
+        try:
+            gc.collect()
+            entries = replacement.scan()
+        except Exception as exc:
+            record("full scan after reset", exc)
+        else:
+            results, limited = _collate_scan_results(entries, max_results=max_results)
+            return results, limited, replacement
+
+    failure = WifiScanFailure(attempt_log)
+    if attempt_log:
+        raise failure from attempt_log[-1][1]
+    raise failure
+
+
+def _scan_wifi_by_channel(wlan, *, max_results=24, attempt_log=None):
+    """Scan each channel individually using the best supported strategy."""
+
+    attempt_log = attempt_log if attempt_log is not None else []
+
+    result = _scan_wifi_by_channel_scan_kw(wlan, max_results=max_results, attempt_log=attempt_log)
+    if result is not None:
+        return result
+
+    return _scan_wifi_by_channel_config(wlan, max_results=max_results, attempt_log=attempt_log)
+
+
+def _scan_wifi_by_channel_scan_kw(wlan, *, max_results, attempt_log):
+    scan = getattr(wlan, "scan", None)
+    if not callable(scan):
+        return None
+
+    seen = set()
+    results = []
+    limited = False
+
+    channel_kwargs = {}
+    passive_flag = getattr(network.WLAN, "SCAN_PASSIVE", None)
+    if passive_flag is not None:
+        channel_kwargs["type"] = passive_flag
+
+    for channel in _SCAN_CHANNELS:
+        try:
+            gc.collect()
+            partial = scan(channel=channel, **channel_kwargs)
+        except TypeError as exc:
+            if channel_kwargs:
+                channel_kwargs.clear()
+                try:
+                    gc.collect()
+                    partial = scan(channel=channel)
+                except TypeError:
+                    if channel == _SCAN_CHANNELS[0]:
+                        attempt_log.append(("scan(channel=)", exc))
+                    return None
+            else:
+                if channel == _SCAN_CHANNELS[0]:
+                    attempt_log.append(("scan(channel=)", exc))
+                return None
+        except Exception as exc:
+            attempt_log.append(("scan(channel={})".format(channel), exc))
+            if _is_enomem_error(exc):
+                continue
+            return None
+
+        limited = _merge_scan_entries(partial, results=results, seen=seen, max_results=max_results) or limited
+        if limited:
+            break
+
+    return results, limited
+
+
+class _ChannelConfigController:
+    """Helper that hides the WLAN.config signature differences."""
+
+    __slots__ = ("config", "mode", "original", "restore")
+
+    def __init__(self, wlan):
+        self.config = getattr(wlan, "config", None)
+        self.mode = None
+        self.original = None
+        self.restore = False
+
+    def supported(self):
+        return callable(self.config)
+
+    def remember_original(self):
+        if not self.supported():
+            return
+        try:
+            self.original = self.config("channel")
+            self.restore = True
+        except Exception:
+            self.original = None
+            self.restore = False
+
+    def _set(self, value):
+        if not self.supported():
+            return False
+
+        config = self.config
+        mode = self.mode
+
+        if mode == "kw":
+            try:
+                config(channel=value)
+                return True
+            except Exception:
+                self.mode = None
+        elif mode == "pos":
+            try:
+                config("channel", value)
+                return True
+            except Exception:
+                self.mode = None
+
+        if self.mode is None:
+            try:
+                config(channel=value)
+            except TypeError:
+                pass
+            except Exception:
+                return False
+            else:
+                self.mode = "kw"
+                return True
+
+            try:
+                config("channel", value)
+            except Exception:
+                return False
+            else:
+                self.mode = "pos"
+                return True
+
+        return False
+
+    def set(self, value):
+        return self._set(value)
+
+    def restore_original(self):
+        if not self.restore:
+            return
+        if self.original is None:
+            return
+        try:
+            self._set(self.original)
+        except Exception:
+            pass
+
+
+def _scan_wifi_by_channel_config(wlan, *, max_results, attempt_log):
+    controller = _ChannelConfigController(wlan)
+    if not controller.supported():
+        return None
+
+    controller.remember_original()
+
+    seen = set()
+    results = []
+    limited = False
+
+    try:
+        for channel in _SCAN_CHANNELS:
+            if not controller.set(channel):
+                if channel == _SCAN_CHANNELS[0]:
+                    attempt_log.append(("config('channel', value)", TypeError("unsupported signature")))
+                    return None
+                continue
+
+            try:
+                gc.collect()
+                partial = wlan.scan()
+            except Exception as exc:
+                attempt_log.append(("scan() after config channel {}".format(channel), exc))
+                if _is_enomem_error(exc):
+                    continue
+                return None
+
+            limited = _merge_scan_entries(partial, results=results, seen=seen, max_results=max_results) or limited
+            if limited:
+                break
+    finally:
+        controller.restore_original()
+
+    return results, limited
+
+
+def _reset_sta_interface(wlan, attempt_log):
+    """Attempt to tear down and recreate the shared STA interface."""
+
+    global _shared_wlan
+
+    active = getattr(wlan, "active", None)
+    if callable(active):
+        try:
+            active(False)
+        except Exception as exc:
+            attempt_log.append(("wlan.active(False)", exc))
+
+    deinit = getattr(wlan, "deinit", None)
+    if callable(deinit):
+        try:
+            deinit()
+        except Exception as exc:
+            attempt_log.append(("wlan.deinit()", exc))
+
+    if wlan is _shared_wlan:
+        _shared_wlan = None
+        try:
+            return get_shared_wlan()
+        except Exception as exc:
+            attempt_log.append(("recreate WLAN", exc))
+            return None
+
+    return None
+
+
+def _format_wifi_exception(exc):
+    """Return a short, user-facing description for Wi-Fi scan failures."""
+
+    if isinstance(exc, WifiScanFailure):
+        if not exc.attempts:
+            return "Scan pipeline failed"
+        parts = []
+        for step, attempt_exc in exc.attempts:
+            parts.append("{}: {}".format(step, _describe_exception(attempt_exc)))
+        return "Scan pipeline failed; " + "; ".join(parts)
+
+    if isinstance(exc, MemoryError):
+        return "Out of memory"
+
+    if isinstance(exc, OSError):
+        err_no = getattr(exc, "errno", None)
+        if err_no is None and exc.args:
+            first = exc.args[0]
+            if isinstance(first, int):
+                err_no = first
+        if err_no == getattr(errno, "ENOMEM", 12):
+            return "Driver ENOMEM"
+        if err_no is not None:
+            return "OSError {}".format(err_no)
+        msg = str(exc)
+        return msg or "OSError"
+
+    return str(exc) or exc.__class__.__name__
+
+
+def _split_display_message(message, max_len=20):
+    """Split a long detail string so it fits within the OLED width."""
+
+    if not message:
+        return []
+
+    chunks = []
+    text = str(message)
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            if chunks and chunks[-1] == "":
+                continue
+            chunks.append("")
+            continue
+        start = 0
+        length = len(line)
+        while start < length:
+            chunks.append(line[start:start + max_len])
+            start += max_len
+    return [chunk for chunk in chunks if chunk]
 
 # -----------------------
 # Globals
@@ -802,6 +1230,33 @@ class WifiScanScreen(ListScreen):
         self.wlan = None
         self._scan_task = asyncio.create_task(self._scan_wifi())
 
+    def _show_scan_error(self, detail, exc=None):
+        lines = [("WiFi error", None)]
+        if isinstance(exc, WifiScanFailure):
+            detail_chunks = _split_display_message(detail)
+            if detail_chunks:
+                for chunk in detail_chunks:
+                    lines.append((chunk, None))
+            summary = exc.summary_lines(limit=6)
+            for chunk in summary:
+                lines.append((chunk, None))
+            if not summary and not detail_chunks:
+                lines.append(("See log for details", None))
+        else:
+            for chunk in _split_display_message(detail):
+                lines.append((chunk, None))
+        lines.append(("SELECT to retry", None))
+        lines.append(("BACK to exit", None))
+        self.items = lines
+        self.index = 0
+        self.offset = 0
+        self.render()
+        if exc is not None:
+            if isinstance(exc, WifiScanFailure):
+                for _, attempt_exc in exc.attempts:
+                    sys.print_exception(attempt_exc)
+            sys.print_exception(exc)
+
     async def _scan_wifi(self):
         global _shared_wlan
         try:
@@ -826,8 +1281,7 @@ class WifiScanScreen(ListScreen):
                         self.wlan = get_shared_wlan()
                 wlan = self.wlan
             except Exception as exc:
-                self.items = [("WiFi error", None), (str(exc), None)]
-                self.render()
+                self._show_scan_error(_format_wifi_exception(exc), exc)
                 return
 
             try:
@@ -836,14 +1290,14 @@ class WifiScanScreen(ListScreen):
                 wlan.active(True)
                 await asyncio.sleep_ms(100)
                 try:
-                    nets = wlan.scan()
-                except MemoryError:
-                    self.items = [("WiFi error", None), ("Out of memory", None), ("BACK to exit", None)]
-                    self.render()
+                    nets, limited, replacement = _scan_wifi_networks(wlan)
+                except Exception as exc:
+                    self._show_scan_error(_format_wifi_exception(exc), exc)
                     return
-            except Exception:
-                self.items = [("Scan failed", None), ("SELECT to retry", None)]
-                self.render()
+                if replacement is not None and self.wlan is wlan:
+                    self.wlan = replacement
+            except Exception as exc:
+                self._show_scan_error(_format_wifi_exception(exc), exc)
                 return
             finally:
                 if not already_active:
@@ -858,6 +1312,9 @@ class WifiScanScreen(ListScreen):
                 return
 
             nets.sort(key=lambda entry: entry[3], reverse=True)
+            if len(nets) > 24:
+                nets = nets[:24]
+                limited = True
             auth_map = {0: " ", 1: "W", 2: "P", 3: "P", 4: "P"}
             items = []
             for ssid, _, _, rssi, authmode, *_ in nets:
@@ -867,6 +1324,9 @@ class WifiScanScreen(ListScreen):
                     ssid_str = "???"
                 auth_char = auth_map.get(authmode, "?")
                 items.append(("{} {:>3} {}".format(auth_char, rssi, ssid_str[:15]), rssi))
+
+            if limited:
+                items.append(("Limited list (memory)", None))
 
             self.items = items or [("Unsupported entries", None)]
             self.index = 0
@@ -1818,8 +2278,10 @@ async def main():
     show_bsides_logo(oled)
     print("Username: {}".format(USERNAME))
 
-    if homeassistant:
-        ha_bridge = homeassistant.initialize(
+    ha_module = ensure_homeassistant_loaded()
+
+    if ha_module:
+        ha_bridge = ha_module.initialize(
             device_id,
             get_led_state_for_homeassistant,
             apply_homeassistant_command,
