@@ -8,16 +8,10 @@ import ssl
 import json
 import uasyncio as asyncio
 import time, micropython
-import gc
 from machine import Pin, I2C
 import ssd1306, neopixel
 import bsides_logo
 import math
-
-try:
-    import homeassistant
-except ImportError:
-    homeassistant = None
 
 # Writer
 from writer.writer import Writer
@@ -51,20 +45,10 @@ REPEAT_INTERVAL = 10  # ms between repeats
 INACTIVITY_TIMEOUT = 5000  # ms
 LOGO_PERIOD = 3000  # ms
 
-# WiFi credentials - defaults, can override via config.json when needed
 SSID = "bsides-badge"
 PASSWORD = "bsidestallinn"
 URL = "https://badge.bsides.ee"
 URL_QR = "badge.bsides.ee"
-
-_wlan = None
-
-def get_shared_wlan():
-    """Return a module-wide STA interface, creating it lazily."""
-    global _wlan
-    if _wlan is None:
-        _wlan = network.WLAN(network.STA_IF)
-    return _wlan
 
 # -----------------------
 # Globals
@@ -125,10 +109,6 @@ params = {
     "Light_effect" : led_effect
 }
 
-# --- Snake high score param (persistent in params.json) ---
-snake_high_score = Parameter("SnakeHighScore", 0, 9999)
-params["SnakeHighScore"] = snake_high_score
-
 FILENAME = "params.json"
 
 def save_params():
@@ -146,89 +126,6 @@ def load_params():
     except OSError:
         # file not found, keep defaults
         pass
-
-
-def get_effect_names():
-    return [name for name, _ in led_effects] if led_effects else []
-
-
-def _clamp(value, minimum, maximum):
-    return max(minimum, min(maximum, value))
-
-
-def get_led_state_for_homeassistant():
-    effect_index = led_effect.value if led_effect.value < len(led_effects) else 0
-    effect_name = None
-    effect_list = get_effect_names()
-    if effect_index < len(effect_list):
-        effect_name = effect_list[effect_index]
-
-    brightness_255 = int((led_brightness.value * 255) / max(1, led_brightness.maxval))
-    return {
-        "effect_index": effect_index,
-        "effect_name": effect_name,
-        "brightness": _clamp(brightness_255, 0, 255),
-        "hue": _clamp(led_hue.value, 0, led_hue.maxval),
-        "saturation": _clamp(led_sat.value, 0, led_sat.maxval),
-        "speed": _clamp(led_speed.value, 0, led_speed.maxval),
-    }
-
-
-def apply_homeassistant_command(cmd):
-    changed = False
-
-    if "effect" in cmd:
-        effect_list = get_effect_names()
-        effect_value = cmd.get("effect")
-        new_idx = None
-        if isinstance(effect_value, int):
-            if 0 <= effect_value < len(effect_list):
-                new_idx = effect_value
-        elif isinstance(effect_value, str):
-            if effect_value in effect_list:
-                new_idx = effect_list.index(effect_value)
-        if new_idx is not None and led_effect.value != new_idx:
-            led_effect.value = new_idx
-            changed = True
-
-    if "brightness" in cmd:
-        try:
-            value = int(cmd["brightness"])
-            value = _clamp(value, 0, 255)
-            new_val = int((value * led_brightness.maxval) / 255)
-            new_val = _clamp(new_val, 0, led_brightness.maxval)
-            if led_brightness.value != new_val:
-                led_brightness.value = new_val
-                changed = True
-        except (ValueError, TypeError):
-            pass
-
-    hs_color = cmd.get("hs_color")
-    if isinstance(hs_color, (list, tuple)) and len(hs_color) >= 2:
-        try:
-            h = int(hs_color[0]) % 360
-            s = int(hs_color[1])
-            s = _clamp(s, 0, 100)
-            if led_hue.value != h or led_sat.value != s:
-                led_hue.value = h
-                led_sat.value = s
-                changed = True
-        except (ValueError, TypeError):
-            pass
-
-    if "speed" in cmd:
-        try:
-            new_speed = _clamp(int(cmd["speed"]), 0, led_speed.maxval)
-            if led_speed.value != new_speed:
-                led_speed.value = new_speed
-                changed = True
-        except (ValueError, TypeError):
-            pass
-
-    if changed:
-        save_params()
-
-    return changed
 
 # -----------------------
 # Username and ID
@@ -395,21 +292,12 @@ class ParamScreen(Screen):
         self.oled.show()
 
     async def handle_button(self, btn):
-        changed = False
         if btn == BTN_NEXT and (self.wraparound or self.param.value < self.param.maxval):
-            new_val = (self.param.value + 1) % (self.param.maxval + 1)
-            if new_val != self.param.value:
-                self.param.value = new_val
-                changed = True
+            self.param.value = (self.param.value + 1) % (self.param.maxval + 1)
         elif btn == BTN_PREV and (self.wraparound or self.param.value > 0):
-            new_val = (self.param.value - 1) % (self.param.maxval + 1)
-            if new_val != self.param.value:
-                self.param.value = new_val
-                changed = True
+            self.param.value = (self.param.value - 1) % (self.param.maxval + 1)
         elif btn in (BTN_SELECT, BTN_BACK):
             return self.returnscreen(self.oled)
-        if changed and homeassistant:
-            homeassistant.notify_led_state()
         return self
 
 class BrightnessScreen(ParamScreen):
@@ -488,8 +376,6 @@ class EffectScreen(ListScreen):
     def on_select(self, index):
         global led_effect
         led_effect.value = index
-        if homeassistant:
-            homeassistant.notify_led_state()
         return self
 
     def on_back(self):
@@ -598,120 +484,7 @@ class StopwatchScreen(Screen):
     _paused_base = 0
 
 
-class MemCheckScreen(Screen):
-    def __init__(self, oled):
-        super().__init__(oled)
-        self.render()
-
-    def render(self):
-        self.oled.fill(0)
-        import gc
-        mem_free = gc.mem_free()
-
-        # Title
-        wri10.set_textpos(self.oled, 0, 0)
-        wri10.printstring("Memory Info")
-
-        # Current free memory
-        wri10.set_textpos(self.oled, 20, 0)
-        wri10.printstring(f"Free: {mem_free}")
-
-        # Force GC and show difference
-        gc.collect()
-        mem_after = gc.mem_free()
-        diff = mem_after - mem_free
-
-        wri10.set_textpos(self.oled, 35, 0)
-        wri10.printstring(f"After GC: {mem_after}")
-        wri10.set_textpos(self.oled, 50, 0)
-        wri10.printstring(f"Freed: {diff}")
-
-        self.oled.show()
-
-    async def handle_button(self, btn):
-        if btn == BTN_SELECT:
-            self.render()  # Refresh stats
-        elif btn == BTN_BACK:
-            return UtilsScreen(self.oled)
-        return self
-
-class HomeAssistantScreen(Screen):
-    def __init__(self, oled):
-        super().__init__(oled)
-        self.status = "Loading..."
-        self.render()
-        self.check_status()
-    
-    def check_status(self):
-        """Check Home Assistant configuration and connection status."""
-        try:
-            if not homeassistant:
-                self.status = "Home Assistant module\nnot available"
-                return
-                
-            try:
-                with open("homeassistant.json", "r") as fp:
-                    self.status = "Config found\nReady"
-            except OSError:
-                self.status = "No config file found\nCreate homeassistant.json"
-                
-        except Exception as e:
-            self.status = f"Error: {str(e)}"
-            
-        self.render()
-            
-    def render(self):
-        self.oled.fill(0)
-        wri10.set_textpos(self.oled, 0, 0)
-        wri10.printstring("Home Assistant")
-        
-        if self.status:
-            lines = self.status.split('\n')
-            y = 20
-            for line in lines:
-                wri6.set_textpos(self.oled, y, 0)
-                wri6.printstring(line)
-                y += 10
-                
-        self.oled.show()
-        
-    async def handle_button(self, btn):
-        if btn == BTN_SELECT:
-            self.check_status()  # Refresh status
-        elif btn == BTN_BACK:
-            return UtilsScreen(self.oled)
-        return self
-
-# -----------------------
-# Lazy loaders (must be before utils_screens)
-# -----------------------
-def LazySnakeScreen(oled):
-    """Lazy-load snake game to save memory."""
-    import gc
-    gc.collect()
-    from lib.snake_game import create_snake_screen
-    # Import UtilsScreen at runtime to avoid forward reference
-    import bsides25
-    return create_snake_screen(Screen, oled, wri6, OLED_WIDTH, OLED_HEIGHT,
-                               BTN_NEXT, BTN_PREV, BTN_SELECT, BTN_BACK,
-                               snake_high_score, save_params, bsides25.UtilsScreen)
-
-def LazySponsorsScreen(oled):
-    """Lazy-load sponsors screen to save memory."""
-    import gc
-    gc.collect()
-    from lib.sponsors_screen import create_sponsors_screen
-    # Import UtilsScreen at runtime to avoid forward reference
-    import bsides25
-    return create_sponsors_screen(Screen, oled, BTN_NEXT, BTN_PREV, BTN_BACK, bsides25.UtilsScreen)
-
-utils_screens = [
-    ("Stopwatch", StopwatchScreen),
-    ("Memory Check", MemCheckScreen),
-    ("Snake", LazySnakeScreen),
-    ("Sponsors", LazySponsorsScreen),
-    ("Home Assistant", HomeAssistantScreen),
-]
+utils_screens = [("Stopwatch", StopwatchScreen)]
 
 class UtilsScreen(ListScreen):
     def __init__(self, oled):
@@ -774,9 +547,7 @@ class FetchNameScreen(Screen):
 
     async def _connect_wifi(self):
         if not self.wlan:
-            self.wlan = get_shared_wlan()
-        if not self.wlan:
-            raise RuntimeError("WiFi init failed")
+            self.wlan = network.WLAN(network.STA_IF)
         self.wlan.active(True)
         if not self.wlan.isconnected():
             self.wlan.connect(SSID, PASSWORD)
@@ -891,7 +662,6 @@ class CodeRepoScreen(Screen):
 
         self.oled.show()
 
-
 badge_screens = [("Fetch Name", FetchNameScreen),
                  ("Code git", CodeRepoScreen)]
 
@@ -906,6 +676,47 @@ class BadgeScreen(ListScreen):
     def on_back(self):
         save_params()
         return MenuScreen(self.oled)
+
+# -----------------------
+# Sponsors screens
+# -----------------------
+
+class SponsorsScreen(Screen):
+    def __init__(self, oled):
+        super().__init__(oled)
+
+        # Import logos dynamically
+        LOGO_FOLDER = "logos"
+        if LOGO_FOLDER not in sys.path:
+            sys.path.append(LOGO_FOLDER)
+        logo_files = sorted([f for f in os.listdir(LOGO_FOLDER) if f.endswith(".py")])
+
+        self.logos = []
+        self.current_logo = 0
+        for f in logo_files:
+            module_name = f[:-3]  # strip '.py'
+            mod = __import__(module_name)
+            if hasattr(mod, "fb"):
+                self.logos.append(mod.fb)
+            else:
+                print(f"Warning: {module_name} has no attribute 'fb'")
+
+        if not self.logos:
+            raise RuntimeError("No valid logos found!")
+
+    def render(self):
+        self.oled.fill(0)
+        self.oled.blit(self.logos[self.current_logo], 0, 0)
+        self.oled.show()
+
+    async def handle_button(self, btn):
+        if btn == BTN_NEXT:
+            self.current_logo = (self.current_logo + 1) % len(self.logos)
+        elif btn == BTN_PREV:
+            self.current_logo = (self.current_logo - 1) % len(self.logos)
+        if btn == BTN_BACK:
+            return MenuScreen(self.oled)
+        return self
 
 # -----------------------
 # Text screens
@@ -986,6 +797,7 @@ class OurteamScreen(TextScreen):
 
 class MenuScreen(Screen):
     items = [("About", AboutScreen),
+             ("Sponsors", SponsorsScreen),
              ("Our team", OurteamScreen),
              ("Utils", UtilsScreen),
              ("Lights", LightsScreen),
@@ -1272,70 +1084,6 @@ def led_eff_spiral_spin(np, oldstate):
     return state
 
 
-def led_eff_olympic(np, oldstate):
-    """Olympic rings inspired segments that slowly rotate around the ring."""
-    state = oldstate or {"phase": 0.0}
-    n = len(np)
-
-    if n == 0:
-        return state
-
-    olympic_colors = [240, 60, 0, 120, 360]  # blue, yellow, black, green, red
-    ring_size = n / 5
-    s = led_sat.value / 100
-    v = led_brightness.value / 100
-
-    for i in range(n):
-        rotated_pos = (i + state["phase"]) % n
-        ring_index = int(rotated_pos / ring_size) % 5
-        ring_pos = (rotated_pos % ring_size) / ring_size
-
-        brightness_mult = 0.3 + 0.7 * (0.5 * (1 + math.sin(ring_pos * 2 * math.pi)))
-
-        if ring_index == 2:
-            dim = int(255 * v * brightness_mult * 0.2)
-            np[i] = (dim, dim, dim)
-        else:
-            hue = olympic_colors[ring_index] % 360
-            np[i] = hsv_to_rgb(hue, s, v * brightness_mult)
-
-    state["phase"] = (state["phase"] + led_speed.value / 300.0) % n
-    return state
-
-
-def led_eff_police(np, oldstate):
-    """Alternating red and blue strobes reminiscent of police lights."""
-    state = oldstate or {"phase": 0}
-    n = len(np)
-
-    if n == 0:
-        return state
-
-    half_size = n // 2
-    phase = state["phase"]
-
-    s = led_sat.value / 100
-    v = led_brightness.value / 100
-    red = hsv_to_rgb(0, s, v)
-    blue = hsv_to_rgb(240, s, v)
-    off = (0, 0, 0)
-
-    np.fill(off)
-
-    if 0 <= phase < 25:
-        for i in range(half_size):
-            np[i] = red
-    elif 50 <= phase < 75:
-        for i in range(half_size, n):
-            np[i] = blue
-
-    increment = int(led_speed.value / 10)
-    if increment < 1:
-        increment = 1
-    state["phase"] = (phase + increment) % 100
-    return state
-
-
 async def neopixel_task(np):
     global led_effect
     global led_effects
@@ -1348,17 +1096,10 @@ async def neopixel_task(np):
                    ("Comet", led_eff_comet),
                    ("Rainbow Comet", led_eff_rainbow_comet),
                    ("Ping-Pong", led_eff_ping_pong),
-                   ("Dual Hue", led_eff_dual_hue),
+                   ("Dual Hue", led_eff_dual_hue),        
                    ("Aurora", led_eff_aurora),
                    ("Spiral Spin", led_eff_spiral_spin),
-                   ("Olympic", led_eff_olympic),
-                   ("Police", led_eff_police),
                    ("Cycle_All", led_eff_autocycle)]
-
-    led_effect.maxval = len(led_effects) - 1
-
-    if homeassistant:
-        homeassistant.notify_effect_list()
 
     while True:
         if led_startup == True:
@@ -1389,10 +1130,7 @@ async def ui_task(oled):
         if screen == None:
             screen = MenuScreen(oled)
         screen = await screen.handle_button(btn)
-
-        # Only auto-render non-Snake screens (Snake renders itself)
-        if screen.__class__.__name__ != 'SnakeScreen':
-            screen.render()
+        screen.render()
 
 def show_bsides_logo(oled):
     oled.fill(0)
@@ -1487,38 +1225,9 @@ async def main():
     show_bsides_logo(oled)
     print("Username: {}".format(USERNAME))
 
-    # HomeAssistant is optional - only loads if homeassistant.json exists
-    if homeassistant:
-        try:
-            ha_bridge = homeassistant.initialize(
-                device_id,
-                get_led_state_for_homeassistant,
-                apply_homeassistant_command,
-                get_effect_names,
-                (SSID, PASSWORD),
-                shared_wlan_factory=get_shared_wlan,
-            )
-            if ha_bridge:
-                asyncio.create_task(ha_bridge.run())
-        except:
-            pass  # HA config not found or init failed
-
     await asyncio.gather(ui_task(oled), inactivity_task(oled), neopixel_task(np))
 
-_getenv = getattr(os, "getenv", None)
-if _getenv is None and hasattr(os, "environ"):
-    _getenv = os.environ.get
-
-skip_main = False
-if _getenv is not None:
-    try:
-        skip_main = _getenv("BSIDES_BADGE_SKIP_MAIN") == "1"
-    except (TypeError, AttributeError):
-        # MicroPython's minimal getenv may not accept keyword args or may be stubbed.
-        skip_main = False
-
-if not skip_main:
-    try:
-        asyncio.run(main())
-    finally:
-        asyncio.new_event_loop()
+try:
+    asyncio.run(main())
+finally:
+    asyncio.new_event_loop()
