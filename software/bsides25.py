@@ -144,6 +144,47 @@ def _scan_wifi_by_channel(wlan, *, max_results=24):
     original_channel = None
     restore_channel = False
 
+    def _set_channel(value):
+        setter_mode = getattr(_set_channel, "_mode", None)
+
+        # Fast-path when we already know the signature to use.
+        if setter_mode == "kw":
+            try:
+                config(channel=value)
+                return True
+            except Exception:
+                setattr(_set_channel, "_mode", None)
+        elif setter_mode == "pos":
+            try:
+                config("channel", value)
+                return True
+            except Exception:
+                setattr(_set_channel, "_mode", None)
+
+        # Try keyword-argument form first.
+        try:
+            config(channel=value)
+        except TypeError:
+            pass
+        except Exception:
+            return False
+        else:
+            setattr(_set_channel, "_mode", "kw")
+            return True
+
+        # Fall back to the legacy positional form.
+        try:
+            config("channel", value)
+        except TypeError:
+            return False
+        except Exception:
+            return False
+        else:
+            setattr(_set_channel, "_mode", "pos")
+            return True
+
+    setattr(_set_channel, "_mode", None)
+
     try:
         try:
             original_channel = config("channel")
@@ -153,9 +194,7 @@ def _scan_wifi_by_channel(wlan, *, max_results=24):
             restore_channel = False
 
         for channel in _SCAN_CHANNELS:
-            try:
-                config(channel=channel)
-            except Exception:
+            if not _set_channel(channel):
                 if channel == _SCAN_CHANNELS[0]:
                     return None
                 continue
@@ -182,7 +221,8 @@ def _scan_wifi_by_channel(wlan, *, max_results=24):
     finally:
         if restore_channel:
             try:
-                config(channel=original_channel)
+                if original_channel is not None:
+                    _set_channel(original_channel)
             except Exception:
                 pass
 
