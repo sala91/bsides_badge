@@ -61,13 +61,70 @@ _shared_wlan = None
 
 def get_shared_wlan():
     """Return a module-wide STA interface, creating it lazily."""
-
     global _shared_wlan
-
-    if _shared_wlan is None:
+    
+    print("get_shared_wlan: Starting...")
+    print(f"Current memory: {gc.mem_free()}")
+    
+    try:
+        # First check if we have a working interface
+        if _shared_wlan is not None:
+            try:
+                print("get_shared_wlan: Testing existing interface...")
+                # Just check if we can access a method
+                _shared_wlan.active()
+                print("get_shared_wlan: Existing interface OK")
+                return _shared_wlan
+            except Exception as e:
+                print(f"get_shared_wlan: Existing interface failed: {e}")
+                _shared_wlan = None
+        
+        print("get_shared_wlan: Creating new interface...")
+        
+        # Force garbage collection before creating new interface
         gc.collect()
-        _shared_wlan = network.WLAN(network.STA_IF)
-    return _shared_wlan
+        print(f"Memory after GC: {gc.mem_free()}")
+        
+        try:
+            print("get_shared_wlan: Importing network...")
+            import network
+        except ImportError as e:
+            print(f"get_shared_wlan: Network import failed: {e}")
+            return None
+            
+        # Check network module has what we need
+        if not hasattr(network, 'WLAN'):
+            print("get_shared_wlan: No WLAN in network module")
+            return None
+        if not hasattr(network, 'STA_IF'):
+            print("get_shared_wlan: No STA_IF in network module")
+            return None
+        
+        # Create new interface
+        try:
+            print("get_shared_wlan: Creating WLAN...")
+            _shared_wlan = network.WLAN(network.STA_IF)
+            print("get_shared_wlan: WLAN created")
+            
+            # Test the new interface
+            print("get_shared_wlan: Testing new interface...")
+            _shared_wlan.active()
+            print("get_shared_wlan: New interface OK")
+            
+            return _shared_wlan
+            
+        except OSError as e:
+            print(f"get_shared_wlan: OSError creating WLAN: {e}")
+            _shared_wlan = None
+            return None
+        except Exception as e:
+            print(f"get_shared_wlan: Error creating WLAN: {type(e).__name__} - {e}")
+            _shared_wlan = None
+            return None
+            
+    except Exception as e:
+        print(f"get_shared_wlan: Unexpected error: {type(e).__name__} - {e}")
+        return None
 
 # -----------------------
 # Globals
@@ -636,9 +693,158 @@ class MemCheckScreen(Screen):
         elif btn == BTN_BACK:
             return UtilsScreen(self.oled)
         return self
+class WiFiTestScreen(Screen):
+    def __init__(self, oled):
+        super().__init__(oled)
+        self.test_running = False
+        self.test_task = None
+        self.status_lines = []
+        self.render()
+
+    def render(self):
+        self.oled.fill(0)
+        
+        if not self.test_running and not self.status_lines:
+            # Initial state
+            wri10.set_textpos(self.oled, 5, 5)
+            wri10.printstring("Press SELECT to")
+            wri10.set_textpos(self.oled, 20, 5)
+            wri10.printstring("run WiFi test")
+        else:
+            # Show status lines
+            y = 5
+            if self.test_running:
+                wri10.set_textpos(self.oled, y, 5)
+                wri10.printstring("Running test...")
+                wri10.set_textpos(self.oled, y + 12, 5)
+                wri10.printstring("BACK to cancel")
+                y += 25
+
+            # Show last 3 status lines
+            for line in self.status_lines[-3:]:
+                wri10.set_textpos(self.oled, y, 5)
+                wri10.printstring(line)
+                y += 12
+                
+        self.oled.show()
+
+    def add_status(self, msg):
+        """Add a status line and update display"""
+        self.status_lines.append(msg)
+        self.render()
+
+    async def run_wifi_test(self):
+        import wifi_test
+        try:
+            # Temporarily disable Home Assistant if it's running
+            global homeassistant
+            ha_was_running = False
+            if homeassistant and hasattr(homeassistant, '_bridge') and homeassistant._bridge:
+                self.add_status("Pausing HA...")
+                ha_was_running = True
+                try:
+                    await homeassistant._bridge._ensure_disconnected()
+                except Exception as e:
+                    print(f"HA disconnect error: {e}")
+
+            # Force garbage collection before WiFi init
+            gc.collect()
+            
+            # Get the shared WLAN interface with retries
+            self.add_status("Init WiFi...")
+            retries = 2
+            wlan = None
+            
+            while retries > 0 and wlan is None:
+                try:
+                    wlan = get_shared_wlan()
+                    if wlan is None:
+                        self.add_status("Retry WiFi...")
+                        await asyncio.sleep_ms(500)
+                        retries -= 1
+                except Exception as e:
+                    print(f"WLAN error: {e}")
+                    retries -= 1
+                    await asyncio.sleep_ms(500)
+            
+            if wlan is None:
+                self.add_status("WiFi Failed!")
+                print("Could not initialize WiFi")
+                return
+            
+            # Run the test with our shared interface
+            self.add_status("Testing WiFi...")
+            await wifi_test.test_wifi(wlan, self.add_status)
+            self.add_status("Done!")
+            
+        except Exception as e:
+            msg = f"Error: {type(e).__name__}"
+            print(f"WiFi test error: {msg} - {str(e)}")
+            self.add_status(msg)
+            
+        finally:
+            # Clean up
+            self.test_running = False
+            self.render()
+            # Force garbage collection
+            gc.collect()
+
+    async def handle_button(self, btn):
+        if btn == BTN_SELECT and not self.test_running:
+            # Clear old status and start new test
+            self.status_lines = []
+            self.test_running = True
+            self.render()
+            # Schedule test as a task we can cancel
+            self.test_task = asyncio.create_task(self.run_wifi_test())
+            
+        elif btn == BTN_BACK:
+            if self.test_task and not self.test_task.done():
+                self.add_status("Cancelling...")
+                self.test_task.cancel()
+                try:
+                    await self.test_task
+                except asyncio.CancelledError:
+                    pass
+                self.test_task = None
+                self.test_running = False
+            return UtilsScreen(self.oled)
+            
+        return self
+
+class HomeAssistantScreen(Screen):
+    def __init__(self, oled):
+        super().__init__(oled)
+        self.render()
+
+    def render(self):
+        self.oled.fill(0)
+        wri10.set_textpos(self.oled, 5, 5)
+        if not homeassistant:
+            wri10.printstring("HA: Disabled")
+        else:
+            ha_cfg = None
+            try:
+                with open("homeassistant.json", "r") as f:
+                    ha_cfg = f.read()
+            except:
+                pass
+            if ha_cfg:
+                wri10.printstring("HA: Config OK")
+            else:
+                wri10.printstring("HA: No config")
+        self.oled.show()
+
+    async def handle_button(self, btn):
+        if btn == BTN_BACK:
+            return UtilsScreen(self.oled)
+        return self
+
 utils_screens = [
     ("Stopwatch", StopwatchScreen),
     ("Memory Check", MemCheckScreen),
+    ("WiFi Test", WiFiTestScreen),
+    ("Home Assistant", HomeAssistantScreen),
 ]
 
 class UtilsScreen(ListScreen):
@@ -662,16 +868,33 @@ class FetchNameScreen(Screen):
         self.oled = oled
         self.index = 0  # only one item
         self.message = ""  # status message to display
-        self.wlan = None
-        self._connected_via_fetch = False
 
     async def handle_button(self, btn):
         global username_lines, USERNAME
         if btn == BTN_SELECT:
+            # Make sure HomeAssistant is disconnected
+            global homeassistant
+            if homeassistant and hasattr(homeassistant, '_bridge') and homeassistant._bridge:
+                self.message = "Disconnecting HA..."
+                self.render()
+                try:
+                    await homeassistant._bridge._ensure_disconnected()
+                except Exception as e:
+                    print(f"HA disconnect error: {e}")
+            
+            # Get shared WLAN interface
+            self.message = "Init WiFi..."
+            self.render()
+            wlan = get_shared_wlan()
+            if wlan is None:
+                self.message = "WiFi init failed!"
+                self.render()
+                return self
+            
             self.message = "Connecting WiFi..."
             self.render()
             try:
-                await self._connect_wifi()
+                await self._connect_wifi(wlan)
             except Exception as e:
                 self.message = f"WiFi error: {e}"
                 self.render()
@@ -696,50 +919,41 @@ class FetchNameScreen(Screen):
                 self.message = f"Fetch error: {e}"
                 self.render()
         elif btn == BTN_BACK:
-            await self._disconnect_wifi()
-            return BadgeScreen(oled)
+            try:
+                await self._disconnect_wifi()
+            except Exception as e:
+                print(f"Disconnect error: {e}")
+            return BadgeScreen(self.oled)
 
         return self
 
-    async def _connect_wifi(self):
-        if not self.wlan:
-            self.wlan = get_shared_wlan()
-        gc.collect()
-        self.wlan.active(True)
-        if not self.wlan.isconnected():
-            self.wlan.connect(SSID, PASSWORD)
-            for _ in range(20):  # wait up to ~10 seconds
-                await asyncio.sleep(0.5)
-                if self.wlan.isconnected():
-                    self._connected_via_fetch = True
-                    return
-            raise RuntimeError("Could not connect to WiFi")
-        self._connected_via_fetch = False
+    async def _connect_wifi(self, wlan):
+        """Connect using the shared WLAN interface"""
+        if not wlan.active():
+            wlan.active(True)
+            await asyncio.sleep_ms(1000)  # Give it time to initialize
+            
+        if not wlan.isconnected():
+            try:
+                wlan.connect(SSID, PASSWORD)
+                for _ in range(20):  # wait up to ~10 seconds
+                    await asyncio.sleep(0.5)
+                    if wlan.isconnected():
+                        return
+                raise RuntimeError("Could not connect to WiFi")
+            except Exception as e:
+                print(f"WiFi connect error: {type(e).__name__} - {e}")
+                raise
 
     async def _disconnect_wifi(self):
-        if not self.wlan:
-            return
-        if self._connected_via_fetch:
-            try:
-                self.wlan.disconnect()
-            except OSError:
-                pass
-            for _ in range(20):  # up to ~10 seconds
-                if not self.wlan.isconnected():
-                    break
-                await asyncio.sleep(0.5)
-            ha_iface = None
-            if homeassistant and getattr(homeassistant, "_bridge", None):
-                try:
-                    ha_iface = homeassistant.get_sta_interface()
-                except AttributeError:
-                    ha_iface = None
-            if ha_iface is not self.wlan:
-                try:
-                    self.wlan.active(False)
-                except OSError:
-                    pass
-            self._connected_via_fetch = False
+        """Clean up shared WLAN interface"""
+        try:
+            wlan = get_shared_wlan()
+            if wlan and wlan.active():
+                wlan.disconnect()
+                await asyncio.sleep(1)  # Brief wait for disconnect
+        except Exception as e:
+            print(f"WiFi disconnect error: {e}")
 
     async def _fetch_name(self):
         # parse URL
@@ -833,104 +1047,8 @@ class CodeRepoScreen(Screen):
 
         self.oled.show()
 
-class WifiScanScreen(ListScreen):
-    def __init__(self, oled):
-        super().__init__(oled, "WiFi Networks", [("Scanning...", None)])
-        self._scan_task = None
-        self.wlan = None
-        self._scan_task = asyncio.create_task(self._scan_wifi())
-
-    async def _scan_wifi(self):
-        global _shared_wlan
-        try:
-            self.items = [("Scanning...", None)]
-            self.index = 0
-            self.offset = 0
-            self.render()
-
-            try:
-                if not self.wlan:
-                    ha_wlan = None
-                    if homeassistant and getattr(homeassistant, "_bridge", None):
-                        try:
-                            ha_wlan = homeassistant.get_sta_interface()
-                        except AttributeError:
-                            ha_wlan = None
-                    if ha_wlan:
-                        if _shared_wlan is None:
-                            _shared_wlan = ha_wlan
-                        self.wlan = ha_wlan
-                    else:
-                        self.wlan = get_shared_wlan()
-                wlan = self.wlan
-            except Exception as exc:
-                self.items = [("WiFi error", None), (str(exc), None)]
-                self.render()
-                return
-
-            try:
-                already_active = wlan.active()
-                gc.collect()
-                wlan.active(True)
-                await asyncio.sleep_ms(100)
-                try:
-                    nets = wlan.scan()
-                except MemoryError:
-                    self.items = [("WiFi error", None), ("Out of memory", None), ("BACK to exit", None)]
-                    self.render()
-                    return
-            except Exception:
-                self.items = [("Scan failed", None), ("SELECT to retry", None)]
-                self.render()
-                return
-            finally:
-                if not already_active:
-                    try:
-                        wlan.active(False)
-                    except Exception:
-                        pass
-
-            if not nets:
-                self.items = [("No networks found", None), ("SELECT to retry", None)]
-                self.render()
-                return
-
-            nets.sort(key=lambda entry: entry[3], reverse=True)
-            auth_map = {0: " ", 1: "W", 2: "P", 3: "P", 4: "P"}
-            items = []
-            for ssid, _, _, rssi, authmode, *_ in nets:
-                try:
-                    ssid_str = ssid.decode("utf-8", "ignore")
-                except Exception:
-                    ssid_str = "???"
-                auth_char = auth_map.get(authmode, "?")
-                items.append(("{} {:>3} {}".format(auth_char, rssi, ssid_str[:15]), rssi))
-
-            self.items = items or [("Unsupported entries", None)]
-            self.index = 0
-            self.offset = 0
-            self.render()
-        except asyncio.CancelledError:
-            pass
-        finally:
-            self._scan_task = None
-
-    def on_select(self, index):
-        if self._scan_task and not self._scan_task.done():
-            return self
-
-        self._scan_task = asyncio.create_task(self._scan_wifi())
-        return self
-
-    def on_back(self):
-        if self._scan_task:
-            self._scan_task.cancel()
-            self._scan_task = None
-        return BadgeScreen(self.oled)
-
 
 badge_screens = [("Fetch Name", FetchNameScreen),
-                 ("Scan WiFi", WifiScanScreen),
                  ("Code git", CodeRepoScreen)]
 
 class BadgeScreen(ListScreen):
