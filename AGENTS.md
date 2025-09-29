@@ -3,9 +3,26 @@
 These notes target the badge hardware so agents can build firmware quickly and safely. Keep memory pressure low and reuse shared objects.
 
 ## MCU & Firmware
-- **MCU:** ESP32‑C3FH4 (RISC‑V, 4 MB flash, integrated Wi‑Fi/BLE).
+- **MCU:** ESP32‑C3FH4 (RISC‑V, 4 MB flash, integrated Wi‑Fi/BLE). - de 
 - **Baseline firmware:** `ESP32_GENERIC_C3-20250911-v1.26.1.bin` (MicroPython v1.26.1).
 - **Heap discipline:** Avoid dynamic allocation inside loops; pre‑allocate buffers; prefer `bytearray` over `bytes`; reuse global singletons (Wi‑Fi, I2C, NeoPixel).
+
+##  ESP32-C3 Wi-Fi Feature List
+The following features are supporte:
+* 4 virtual Wi-Fi interfaces, which are STA, AP, Sniffer and reserved.
+* Station-only mode, AP-only mode, station/AP-coexistence mode
+* IEEE 802.11b, IEEE 802.11g, IEEE 802.11n, and APIs to configure the protocol mode
+* WPA/WPA2/WPA3/WPA2-Enterprise/WPA3-Enterprise/WAPI/WPS and DPP
+* AMSDU, AMPDU, HT40, QoS, and other key features
+* Modem-sleep
+* The Espressif-specific ESP-NOW protocol and Long Range mode, which supports up to 1 km * of data traffic
+* Up to 20 MBit/s TCP throughput and 30 MBit/s UDP throughput over the air
+* Sniffer
+* Both fast scan and all-channel scan
+* Multiple antennas
+* Channel state information
+
+For more info on networking see [Espressif](https://docs.espressif.com/projects/esp-idf/en/v5.0/esp32c3/api-guides/wifi.html) and [Micropython](https://docs.micropython.org/en/latest/library/network.WLAN.html) documentation.
 
 ## Pin Map (high‑value)
 | Function | Pin | Notes |
