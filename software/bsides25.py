@@ -134,30 +134,57 @@ def _scan_wifi_networks(wlan, *, max_results=24):
 def _scan_wifi_by_channel(wlan, *, max_results=24):
     """Scan each channel individually to keep peak memory usage low."""
 
+    config = getattr(wlan, "config", None)
+    if not callable(config):
+        return None
+
     seen = set()
     results = []
 
-    for channel in _SCAN_CHANNELS:
-        try:
-            gc.collect()
-            partial = wlan.scan(channel=channel)
-        except TypeError:
-            return None
-        except Exception as exc:
-            if _is_enomem_error(exc):
-                continue
-            raise
+    original_channel = None
+    restore_channel = False
 
-        for entry in partial:
-            if len(entry) < 2:
+    try:
+        try:
+            original_channel = config("channel")
+            restore_channel = True
+        except Exception:
+            original_channel = None
+            restore_channel = False
+
+        for channel in _SCAN_CHANNELS:
+            try:
+                config(channel=channel)
+            except Exception:
+                if channel == _SCAN_CHANNELS[0]:
+                    return None
                 continue
-            bssid = entry[1]
-            if bssid in seen:
-                continue
-            seen.add(bssid)
-            results.append(entry)
-            if len(results) >= max_results:
-                return results
+
+            try:
+                gc.collect()
+                partial = wlan.scan()
+            except Exception as exc:
+                if _is_enomem_error(exc):
+                    continue
+                raise
+
+            for entry in partial:
+                if len(entry) < 2:
+                    continue
+                bssid = entry[1]
+                if bssid in seen:
+                    continue
+                seen.add(bssid)
+                results.append(entry)
+                if len(results) >= max_results:
+                    return results
+
+    finally:
+        if restore_channel:
+            try:
+                config(channel=original_channel)
+            except Exception:
+                pass
 
     return results
 
