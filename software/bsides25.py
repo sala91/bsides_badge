@@ -19,6 +19,15 @@ try:
 except ImportError:
     homeassistant = None
 
+try:
+    from wifi_scanner import (
+        scan_wifi_by_channel as _scan_wifi_by_channel,
+        scan_wifi_networks as _scan_wifi_networks,
+    )
+except ImportError:
+    _scan_wifi_by_channel = None
+    _scan_wifi_networks = None
+
 # Writer
 from writer.writer import Writer
 import writer.freesans20 as freesans20
@@ -836,7 +845,10 @@ class WifiScanScreen(ListScreen):
                 wlan.active(True)
                 await asyncio.sleep_ms(100)
                 try:
-                    nets = wlan.scan()
+                    if _scan_wifi_networks:
+                        nets = _scan_wifi_networks(wlan)
+                    else:
+                        nets = wlan.scan()
                 except MemoryError:
                     self.items = [("WiFi error", None), ("Out of memory", None), ("BACK to exit", None)]
                     self.render()
