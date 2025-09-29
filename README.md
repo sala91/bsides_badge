@@ -2,13 +2,10 @@
 
 ## Hardware
 
-ESP32-C3FH4 (4MB flash) with WiFi and Bluetooth
-
-128x64 px OLED display (SSD1306)
-
-16 WS2812B (Neopixel compatible) LEDs
-
-USB-C for flashing/charging
+* ESP32-C3FH4 (4MB flash) with WiFi and Bluetooth
+* 128x64 px OLED display (SSD1306)
+* 16 WS2812B (Neopixel compatible) LEDs
+* USB-C for flashing/charging
 
 [Schematics](./hardware/BSides_2025_badge_v1.1_schematics.pdf)
 
@@ -33,10 +30,6 @@ After that use flash_badge.sh for Format and Install and sync_badge.sh for just 
 
 If the code is already running on the badge and `mpremote` does not connect, hold `SELECT` button down while resetting your badge (pressing `RESET` button or toggling ON/OFF switch).
 
-## Running tests
-```
-./run_tests_badge.sh -q
-```
 
 ### Badge setup utilities
 
@@ -97,7 +90,7 @@ Once connected, Home Assistant will show a light entity named after the badge ID
 To run the MicroPython-oriented unit tests on a development machine, use:
 
 ```bash
-./run_tests_badge.sh
+./run_tests_badge.sh -q
 ```
 
 The script wraps `pytest` and sets up stubbed hardware modules so the badge firmware can be exercised without Wi-Fi hardware.
