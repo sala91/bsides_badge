@@ -66,17 +66,28 @@ def get_shared_wlan():
     
     if _network_mgr is None:
         try:
+            # Force cleanup before import
             gc.collect()
+            
+            # Import and initialize with minimal memory usage
             from lib.network_manager import get_network_manager
+            gc.collect()  # Clean up after import
+            
             _network_mgr = get_network_manager()
+            gc.collect()  # Clean up after instance creation
+            
             if not _network_mgr.init():
                 print("WiFi init failed!")
+                _network_mgr = None
                 return None
+                
         except Exception as e:
             print("WiFi manager init failed:", e)
+            _network_mgr = None
+            gc.collect()
             return None
             
-    return _network_mgr._wlan if _network_mgr else None
+    return _network_mgr.get_interface() if _network_mgr else None
 
 # -----------------------
 # Globals

@@ -35,46 +35,43 @@ class NetworkManager:
         self._active = False
         self._last_error = WIFI_OK
         self._connect_retries = 0
+        self._initialized = False  # Track if init was successful
         
     def init(self):
         """Initialize the WiFi interface."""
-        if self._wlan is not None:
+        if self._initialized:
             return True
             
         # Force garbage collection before creating the interface
         gc.collect()
             
         try:
+            # Minimal init first
             self._wlan = network.WLAN(network.STA_IF)
+            self._wlan.active(False)  # Deactivate immediately
+            gc.collect()  # Free memory before configuration
             
-            # Reduce buffer sizes if possible to save memory
-            try:
-                # Try to set smaller rx/tx buffers
-                self._wlan.config(rxbuf=512)
-                self._wlan.config(txbuf=512)
-            except:
-                pass
-                
+            # Now configure with minimal settings
             if WIFI_PM_ENABLE:
-                # Enable power save mode when supported
                 try:
                     self._wlan.config(pm=network.WLAN.PM_POWERSAVE)
                 except:
-                    pass  # PM not supported
+                    pass
                     
-            # Immediately deactivate until needed to free resources
-            try:
-                self._wlan.active(False)
-            except:
-                pass
-                
+            # Mark as initialized
+            self._initialized = True
             return True
+            
         except Exception as e:
             self._last_error = WIFI_ERR_CONFIG
             print("WiFi init failed:", e)
             self._wlan = None
-            gc.collect()  # Try to reclaim memory
+            gc.collect()
             return False
+            
+    def get_interface(self):
+        """Safely get the WiFi interface if initialized."""
+        return self._wlan if self._initialized else None
 
     def active(self, active=None):
         """Get/set interface active state."""
@@ -247,10 +244,23 @@ class NetworkManager:
 
     def _ensure_active(self):
         """Ensure interface is initialized and active."""
-        if not self._wlan and not self.init():
+        gc.collect()  # Clean up before activation
+        
+        if not self._initialized and not self.init():
             return False
-        if not self._active and not self.active(True):
-            return False
+            
+        if not self._active:
+            try:
+                if not self._wlan.active():
+                    self._wlan.active(True)
+                    time.sleep_ms(100)  # Give it time to activate
+                self._active = True
+            except Exception as e:
+                print("WiFi activation failed:", e)
+                self._active = False
+                gc.collect()
+                return False
+                
         return True
 
 def get_network_manager():
