@@ -85,6 +85,24 @@ URL = "https://badge.bsides.ee"
 URL_QR = "badge.bsides.ee"
 
 _shared_wlan = None
+_SCAN_CHANNELS = tuple(range(1, 14))
+
+
+def _is_enomem_error(exc):
+    """Return ``True`` when *exc* represents an out-of-memory condition."""
+
+    if isinstance(exc, MemoryError):
+        return True
+
+    if isinstance(exc, OSError):
+        err_no = getattr(exc, "errno", None)
+        if err_no is None and exc.args:
+            first = exc.args[0]
+            if isinstance(first, int):
+                err_no = first
+        return err_no == getattr(errno, "ENOMEM", 12)
+
+    return False
 
 
 def get_shared_wlan():
@@ -96,6 +114,52 @@ def get_shared_wlan():
         gc.collect()
         _shared_wlan = network.WLAN(network.STA_IF)
     return _shared_wlan
+
+
+def _scan_wifi_networks(wlan, *, max_results=24):
+    """Return scan results while handling driver ENOMEM errors gracefully."""
+
+    try:
+        return wlan.scan(), False
+    except Exception as exc:
+        if not _is_enomem_error(exc):
+            raise
+
+        fallback = _scan_wifi_by_channel(wlan, max_results=max_results)
+        if fallback is None:
+            raise
+        return fallback, True
+
+
+def _scan_wifi_by_channel(wlan, *, max_results=24):
+    """Scan each channel individually to keep peak memory usage low."""
+
+    seen = set()
+    results = []
+
+    for channel in _SCAN_CHANNELS:
+        try:
+            gc.collect()
+            partial = wlan.scan(channel=channel)
+        except TypeError:
+            return None
+        except Exception as exc:
+            if _is_enomem_error(exc):
+                continue
+            raise
+
+        for entry in partial:
+            if len(entry) < 2:
+                continue
+            bssid = entry[1]
+            if bssid in seen:
+                continue
+            seen.add(bssid)
+            results.append(entry)
+            if len(results) >= max_results:
+                return results
+
+    return results
 
 
 def _format_wifi_exception(exc):
@@ -913,7 +977,7 @@ class WifiScanScreen(ListScreen):
                 wlan.active(True)
                 await asyncio.sleep_ms(100)
                 try:
-                    nets = wlan.scan()
+                    nets, limited = _scan_wifi_networks(wlan)
                 except Exception as exc:
                     self._show_scan_error(_format_wifi_exception(exc), exc)
                     return
@@ -933,6 +997,9 @@ class WifiScanScreen(ListScreen):
                 return
 
             nets.sort(key=lambda entry: entry[3], reverse=True)
+            if len(nets) > 24:
+                nets = nets[:24]
+                limited = True
             auth_map = {0: " ", 1: "W", 2: "P", 3: "P", 4: "P"}
             items = []
             for ssid, _, _, rssi, authmode, *_ in nets:
@@ -942,6 +1009,9 @@ class WifiScanScreen(ListScreen):
                     ssid_str = "???"
                 auth_char = auth_map.get(authmode, "?")
                 items.append(("{} {:>3} {}".format(auth_char, rssi, ssid_str[:15]), rssi))
+
+            if limited:
+                items.append(("Limited list (memory)", None))
 
             self.items = items or [("Unsupported entries", None)]
             self.index = 0
