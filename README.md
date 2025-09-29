@@ -50,7 +50,7 @@ From the "Badge setup" menu on the device you can:
 * Scan for nearby WiFi networks – the list refreshes automatically after a scan completes, and you can press `SELECT` to trigger another scan if needed.
 * View the Git repository URL for the firmware.
 
-### Snake Game Fork
+## Snake Game Fork
 
 This fork adds a fully playable snake game to the BSides badge menu.
   
@@ -59,7 +59,7 @@ NEXT - Turn right
 SELECT - Pause/New Game  
 BACK - Back to the menu  
 
-### Home Assistant integration
+## Home Assistant integration
 
 Create a file named `homeassistant.json` in the root of the badge filesystem to enable the optional MQTT integration.  When Wi-Fi credentials are supplied the badge will connect automatically, publish Home Assistant discovery information, and expose the LED ring as a controllable light entity.  If you would like the bridge to reuse the built-in BSides SSID/password, set `"use_defaults": true` inside the `wifi` block; otherwise the bridge waits for an existing connection (for example, one initiated from the Fetch Name workflow).
 

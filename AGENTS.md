@@ -71,13 +71,6 @@ These notes target the badge hardware so agents can build firmware quickly and s
 - Double‑buffer the OLED only if needed; otherwise draw directly into the `framebuf`.
 - Prefer integer math and table lookups over `math.sin` in tight loops.
 
-## Minimal Bring‑Up Checklist
-1. Power from **USB‑C**; confirm 3V3 rail.
-2. Flash baseline MicroPython; confirm USB REPL.
-3. Check I²C scan → address **0x3C** (typical SSD1306).
-4. Light one LED at index 0; verify order matches physical.
-5. Read all four buttons; verify boot still OK after presses at reset.
-
 ## Known gotchas
 - **GPIO9**: don’t drive as output; it’s a bootstrap. Keep pull‑ups/downs consistent across reset.
 - **Buttons on 4/5/8/9**: these share SPI/boot roles—configure with gentler pulls and debounce to avoid spurious boots.
