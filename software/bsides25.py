@@ -19,6 +19,8 @@ try:
 except ImportError:
     homeassistant = None
 
+DEFAULT_WIFI_CHANNELS = tuple(range(1, 15))
+
 try:
     from wifi_scanner import (
         scan_wifi_by_channel as _scan_wifi_by_channel,
@@ -77,6 +79,88 @@ def get_shared_wlan():
         gc.collect()
         _shared_wlan = network.WLAN(network.STA_IF)
     return _shared_wlan
+
+
+if not callable(_scan_wifi_by_channel) or not callable(_scan_wifi_networks):
+
+    _WLAN_CHANNEL_UNSET = object()
+
+    def _scan_wifi_by_channel(wlan, channel):
+        """Attempt to scan a single channel by reconfiguring the interface."""
+
+        if not hasattr(wlan, "config"):
+            return None
+
+        config = getattr(wlan, "config", None)
+        if not callable(config):
+            return None
+
+        previous = _WLAN_CHANNEL_UNSET
+        try:
+            previous = config("channel")
+        except Exception:
+            previous = _WLAN_CHANNEL_UNSET
+
+        try:
+            try:
+                config(channel=channel)
+            except TypeError:
+                config("channel", channel)
+        except Exception:
+            return None
+
+        try:
+            results = wlan.scan()
+        except MemoryError:
+            results = []
+        finally:
+            if previous is not _WLAN_CHANNEL_UNSET:
+                try:
+                    config(channel=previous)
+                except TypeError:
+                    try:
+                        config("channel", previous)
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+
+        return list(results or [])
+
+
+    def _scan_wifi_networks(wlan, channels=DEFAULT_WIFI_CHANNELS):
+        """Scan for networks with a per-channel fallback on ENOMEM."""
+
+        try:
+            return list(wlan.scan())
+        except MemoryError:
+            gc.collect()
+            try:
+                return list(wlan.scan())
+            except MemoryError:
+                pass
+
+        dedup = {}
+        per_channel_supported = False
+
+        for channel in channels:
+            channel_results = _scan_wifi_by_channel(wlan, channel)
+            if channel_results is None:
+                continue
+
+            per_channel_supported = True
+            for entry in channel_results:
+                if len(entry) < 4:
+                    continue
+                bssid = entry[1]
+                existing = dedup.get(bssid)
+                if existing is None or entry[3] > existing[3]:
+                    dedup[bssid] = entry
+
+        if not per_channel_supported:
+            raise MemoryError("per-channel scanning unavailable")
+
+        return list(dedup.values())
 
 # -----------------------
 # Globals
