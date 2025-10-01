@@ -43,12 +43,14 @@ while (( $# )); do
   shift
 done
 
-echo "PORT=$PORT"
-echo "SRC=$SRC"
-echo "CLEAN=$CLEAN  DRY_RUN=$DRYRUN  VERBOSE=$VERBOSE"
-[[ -n "$FORCE_PAT" ]] && echo "FORCE pattern: $FORCE_PAT"
-[[ -n "$ONLY_PAT"  ]] && echo "ONLY  pattern: $ONLY_PAT"
-echo
+if [[ "$VERBOSE" == "yes" ]]; then
+  echo "PORT=$PORT"
+  echo "SRC=$SRC"
+  echo "CLEAN=$CLEAN  DRY_RUN=$DRYRUN  VERBOSE=$VERBOSE"
+  [[ -n "$FORCE_PAT" ]] && echo "FORCE pattern: $FORCE_PAT"
+  [[ -n "$ONLY_PAT"  ]] && echo "ONLY  pattern: $ONLY_PAT"
+  echo
+fi
 
 [[ -d "$SRC" ]] || { echo "Source not found: $SRC" >&2; exit 1; }
 
@@ -121,7 +123,7 @@ matches_force() {
 }
 
 # ------------ Scan local ------------
-echo "Scanning local files..."
+[[ "$VERBOSE" == "yes" ]] && echo "Scanning local files..."
 cd "$SRC"
 
 # Build current manifest (hash size relpath linktarget)
@@ -184,38 +186,67 @@ if [[ "$CLEAN" == "yes" && -f "$MANIFEST" ]]; then
   done < "$MANIFEST"
 fi
 
-echo "Planned changes:"
-echo "  Upload: ${#to_upload} file(s)"
-[[ "$CLEAN" == "yes" ]] && echo "  Delete: ${#to_delete:-0} file(s)"
-[[ "$DRYRUN" == "yes" ]] && echo "(dry-run; no changes will be made)"
-echo
+# Only show summary if there are changes
+if (( ${#to_upload} > 0 || ${#to_delete:-0} > 0 )); then
+  echo "📦 Badge Sync"
+  echo "  → Upload: ${#to_upload} file(s)"
+  [[ "$CLEAN" == "yes" ]] && echo "  → Delete: ${#to_delete:-0} file(s)"
+  [[ "$DRYRUN" == "yes" ]] && echo "  (dry-run mode)"
+  echo
+else
+  echo "✓ Badge is up to date"
+  [[ "$DRYRUN" == "no" ]] && cp "$tmp_manifest" "$MANIFEST"
+  rm -f "$tmp_manifest"
+  exit 0
+fi
 
 # ------------ Execute ------------
 if (( ${#to_upload} > 0 )); then
+  local total=${#to_upload}
+  local count=0
   for rel in "${to_upload[@]}"; do
-    echo "UP  $rel"
-    if [[ "$DRYRUN" == "no" ]]; then
-      ensure_remote_dir "$rel"
-      mpremote connect "$PORT" fs cp "$SRC/$rel" "$DEST_PREFIX$rel"
+    count=$((count + 1))
+    local pct=$((count * 100 / total))
+    local bar_width=20
+    local filled=$((pct * bar_width / 100))
+    local bar=$(printf "%${filled}s" | tr ' ' '█')
+    local empty=$(printf "%$((bar_width - filled))s" | tr ' ' '░')
+    # Truncate filename if too long
+    local display_name="$rel"
+    if (( ${#display_name} > 40 )); then
+      display_name="...${display_name: -37}"
     fi
+    if [[ "$DRYRUN" == "no" ]]; then
+      ensure_remote_dir "$rel" &>/dev/null
+      mpremote connect "$PORT" fs cp "$SRC/$rel" "$DEST_PREFIX$rel" &>/dev/null
+    fi
+    printf "\r\033[K  [%s%s] %3d%% (%d/%d) %s" "$bar" "$empty" "$pct" "$count" "$total" "$display_name"
   done
+  echo
 fi
 
 if [[ "$CLEAN" == "yes" && ${#to_delete:-0} -gt 0 ]]; then
+  local total=${#to_delete}
+  local count=0
   for rel in "${to_delete[@]}"; do
-    echo "RM  $rel"
-    if [[ "$DRYRUN" == "no" ]]; then
-      mpremote connect "$PORT" fs rm "$DEST_PREFIX$rel" || true
+    count=$((count + 1))
+    local display_name="$rel"
+    if (( ${#display_name} > 50 )); then
+      display_name="...${display_name: -47}"
     fi
+    if [[ "$DRYRUN" == "no" ]]; then
+      mpremote connect "$PORT" fs rm "$DEST_PREFIX$rel" &>/dev/null || true
+    fi
+    printf "\r\033[K  Deleting (%d/%d) %s" "$count" "$total" "$display_name"
   done
+  echo
 fi
 
 # ------------ Extra device-side shallow clean using `mpremote fs ls` ------------
 # Deletes remote-only files under each top-level local project directory (e.g., logos, lib).
 # Does not recurse; ideal for flat asset dirs. Honors --only.
 if [[ "$CLEAN" == "yes" ]]; then
-  echo
-  echo "Clean pass (fs ls): removing remote files not present locally (shallow, per project dir)."
+  [[ "$VERBOSE" == "yes" ]] && echo && echo "Clean pass (fs ls): removing remote files not present locally (shallow, per project dir)."
 
   # Build current local file set and collect unique top-level directories that actually exist locally.
   typeset -A present_now; present_now=()
@@ -265,19 +296,18 @@ if [[ "$CLEAN" == "yes" ]]; then
     comm -23 "$tmp_remote_files" "$tmp_local_files" > "$tmp_to_delete"
 
     if [[ -s "$tmp_to_delete" ]]; then
-      echo "Remote-only files under /$root to delete:"
-      cat "$tmp_to_delete"
+      [[ "$VERBOSE" == "yes" ]] && echo "Remote-only files under /$root to delete:" && cat "$tmp_to_delete"
       if [[ "$DRYRUN" == "no" ]]; then
         while IFS= read -r name; do
           [[ -z "$name" ]] && continue
           rel="$root/$name"
           # Respect --only filters
           matches_only "$rel" || continue
-          echo "DEL $rel"
+          [[ "$VERBOSE" == "yes" ]] && echo "DEL $rel"
           mpremote connect "$PORT" fs rm "$DEST_PREFIX$rel" >/dev/null 2>&1 || true
         done < "$tmp_to_delete"
       else
-        echo "(dry-run) Skipping deletions in /$root"
+        [[ "$VERBOSE" == "yes" ]] && echo "(dry-run) Skipping deletions in /$root"
       fi
     else
       [[ "$VERBOSE" == "yes" ]] && echo "No remote-only files under /$root"
@@ -292,10 +322,10 @@ fi
 if [[ "$DRYRUN" == "no" ]]; then
   cp "$tmp_manifest" "$MANIFEST"
   echo
-  echo "Sync complete. Manifest updated: $MANIFEST"
+  echo "✓ Sync complete"
 else
   echo
-  echo "Dry-run complete. No changes made."
+  echo "✓ Dry-run complete (no changes made)"
 fi
 
 rm -f "$tmp_manifest"
