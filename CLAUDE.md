@@ -22,7 +22,7 @@ The following features are supporte:
 * Multiple antennas
 * Channel state information
 
-For more info on networking see [Espressif](https://docs.espressif.com/projects/esp-idf/en/v5.0/esp32c3/api-guides/wifi.html) and [Micropython](https://docs.micropython.org/en/latest/library/network.WLAN.html) documentation.
+For more info on networking see [Espressif](https://docs.espressif.com/projects/esp-idf/en/v5.0/esp32c3/api-guides/wifi.html) and [Micropython](https://docs.micropython.org/en/latest/library/network.WLAN.html) documentation. Keep in mind, that even the game snake loaded into memory can stop wifi from working. A good memory management is essential and not negotiatable!
 
 ## Pin Map (high‑value)
 | Function | Pin | Notes |

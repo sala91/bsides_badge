@@ -650,10 +650,14 @@ class HomeAssistantScreen(Screen):
                 return
                 
             try:
-                with open("homeassistant.json", "r") as fp:
+                from lib.config import get_config
+                config = get_config()
+                if config.homeassistant_enabled:
                     self.status = "Config found\nReady"
-            except OSError:
-                self.status = "No config file found\nCreate homeassistant.json"
+                else:
+                    self.status = "HA disabled in config.json"
+            except Exception:
+                self.status = "No config.json found"
                 
         except Exception as e:
             self.status = f"Error: {str(e)}"
@@ -685,6 +689,18 @@ class HomeAssistantScreen(Screen):
 # -----------------------
 # Lazy loaders (must be before utils_screens)
 # -----------------------
+def LazyAboutScreen(oled):
+    """Lazy-load About screen to save memory."""
+    import gc
+    gc.collect()
+    return AboutScreen(oled)
+
+def LazyOurteamScreen(oled):
+    """Lazy-load Our team screen to save memory."""
+    import gc
+    gc.collect()
+    return OurteamScreen(oled)
+
 def LazySnakeScreen(oled):
     """Lazy-load snake game to save memory."""
     import gc
@@ -706,16 +722,18 @@ def LazySponsorsScreen(oled):
     return create_sponsors_screen(Screen, oled, BTN_NEXT, BTN_PREV, BTN_BACK, bsides25.UtilsScreen)
 
 utils_screens = [
-    ("Stopwatch", StopwatchScreen),
     ("Memory Check", MemCheckScreen),
-    ("Snake", LazySnakeScreen),
-    ("Sponsors", LazySponsorsScreen),
     ("Home Assistant", HomeAssistantScreen),
+    ("Snake", LazySnakeScreen),
+    ("Stopwatch", StopwatchScreen),
+    ("About", LazyAboutScreen),
+    ("Our team", LazyOurteamScreen),
+    ("Sponsors", LazySponsorsScreen),
 ]
 
 class UtilsScreen(ListScreen):
     def __init__(self, oled):
-        super().__init__(oled, "Utils", utils_screens)
+        super().__init__(oled, "Lazy Loaded", utils_screens)
 
     def on_select(self, index):
         cls = utils_screens[index][1]
@@ -985,9 +1003,7 @@ class OurteamScreen(TextScreen):
 # -----------------------
 
 class MenuScreen(Screen):
-    items = [("About", AboutScreen),
-             ("Our team", OurteamScreen),
-             ("Utils", UtilsScreen),
+    items = [("Lazy Loaded", UtilsScreen),
              ("Lights", LightsScreen),
              ("Badge", BadgeScreen)]
 
@@ -1487,7 +1503,7 @@ async def main():
     show_bsides_logo(oled)
     print("Username: {}".format(USERNAME))
 
-    # HomeAssistant is optional - only loads if homeassistant.json exists
+    # HomeAssistant is optional - only loads if enabled in config.json
     if homeassistant:
         try:
             ha_bridge = homeassistant.initialize(

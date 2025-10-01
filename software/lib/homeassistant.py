@@ -1,8 +1,7 @@
 """Home Assistant MQTT integration for the BSides badge.
 
-The integration is optional and only activates when a configuration file
-(`homeassistant.json`) is present on the badge filesystem.  The configuration
-file should look similar to:
+The integration is optional and only activates when enabled in the `config.json`
+file on the badge filesystem. The configuration should look similar to:
 
 ```
 {
@@ -10,7 +9,8 @@ file should look similar to:
     "ssid": "MyNetwork",
     "password": "secret"
   },
-  "mqtt": {
+  "homeassistant": {
+    "enabled": true,
     "broker": "192.168.1.10",
     "port": 1883,
     "username": "mqtt_user",
@@ -20,9 +20,10 @@ file should look similar to:
 }
 ```
 
-Both WiFi and MQTT credentials are optional – the badge will fall back to the
-default BSides WiFi credentials when `wifi` is omitted.  When the file is
-missing, the module silently does nothing.
+The homeassistant section must have `enabled: true` to activate. WiFi credentials
+are optional – the badge will fall back to the default BSides WiFi credentials
+when `wifi` is omitted. When the file is missing or disabled, the module
+silently does nothing.
 """
 
 import json
@@ -86,11 +87,18 @@ def initialize(device_id, state_cb, command_cb, effects_cb, wifi_defaults,
         return None
 
     try:
-        with open("homeassistant.json", "r") as fp:
-            config = json.load(fp)
-    except OSError:
+        from lib.config import get_config
+        config_obj = get_config()
+    except Exception:
         # No configuration present – skip integration silently.
         return None
+
+    # Check if homeassistant is enabled
+    if not config_obj.homeassistant_enabled:
+        return None
+
+    # Get the full config dict for legacy compatibility
+    config = config_obj.config
 
     if shared_wlan_factory is not None:
         _shared_wlan_factory = shared_wlan_factory
@@ -241,7 +249,7 @@ class _HomeAssistantBridge:
         return None, None
 
     def _connect_mqtt(self):
-        mqtt_cfg = self._config.get("mqtt", {})
+        mqtt_cfg = self._config.get("homeassistant", {})
         broker = mqtt_cfg.get("broker")
         if not broker:
             raise RuntimeError("MQTT broker missing in configuration")
@@ -260,7 +268,7 @@ class _HomeAssistantBridge:
         print("Home Assistant: connected to MQTT {}:{}".format(broker, port))
 
     async def _publish_discovery(self):
-        discovery_prefix = self._config.get("mqtt", {}).get(
+        discovery_prefix = self._config.get("homeassistant", {}).get(
             "discovery_prefix", "homeassistant")
         unique_id = "bsides_badge_{}".format(self._device_id.lower())
         topic = "{}/light/{}/config".format(discovery_prefix, unique_id)

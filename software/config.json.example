@@ -1,0 +1,22 @@
+{
+  "wifi": {
+    "ssid": "this-cannot-have-spaces",
+    "password": "",
+    "url": "https://badge.bsides.ee",
+    "url_qr": "badge.bsides.ee"
+  },
+  "homeassistant": {
+    "enabled": false,
+    "broker": "ha.internal",
+    "port": 1883,
+    "username": "",
+    "password": "",
+    "device_name": "BSides Badge",
+    "discovery_prefix": "homeassistant"
+  },
+  "badge": {
+    "auto_connect": false,
+    "scan_on_startup": false,
+    "debug": false
+  }
+}

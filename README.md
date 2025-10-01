@@ -11,7 +11,7 @@
 
 ## Software
 
-The code in `software` is written in MicroPython and loaded onto the badge via USB-C connector.
+The code in `software` is written in MicroPython and loaded onto the badge via USB-C connector. Keep in mind you are ULTRA memory limited, so good memory management is essential for working features such as Wifi. E.g. loading snake into memory is enough to kill WiFi!
 
 Update the code by uploading via `mpremote` or directly via some IDE like [Thonny](https://thonny.org/). If you go [Visual Studio Code](https://code.visualstudio.com) route, you might want to check Python (ms-python.python), Pylance (ms-python.vscode-pylance), MicroPico, Micropython IDE, MPRemote / ESPTool wrappers, GitLens, EditorConfig, Bracket Pair Colorizer / Rainbow Brackets, Tabnine / Copilot extensions.
 
@@ -24,7 +24,7 @@ cp software/config.json.example software/config.json
 ```
 
 Edit `config.json` to configure:
-- **WiFi settings**: SSID, password, badge server URL
+- **WiFi settings**: SSID, password, badge server URL <- NB: The SSID CANOT CONTAIN SPACES
 - **Home Assistant**: MQTT broker settings (optional)
 - **Badge behavior**: Auto-connect, debug mode, etc.
 
